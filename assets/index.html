@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Spidey Quadruped Control</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f0f4f8;
+            --card-bg: #ffffff;
+            --card-border: #e5e7eb;
+            --accent-glow: #10b981;
+            --accent-blue: #2563eb;
+            --text-color: #111827;
+            --text-muted: #6b7280;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 32px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            text-align: center;
+            position: relative;
+        }
+
+        .title {
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+            color: var(--text-color);
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: var(--text-muted);
+            margin-bottom: 32px;
+        }
+
+        .status-box {
+            display: inline-flex;
+            align-items: center;
+            background: #f3f4f6;
+            padding: 8px 16px;
+            border-radius: 30px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 32px;
+            border: 1px solid var(--card-border);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background-color: #9ca3af;
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.active {
+            background-color: var(--accent-glow);
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .toggle-container {
+            margin-bottom: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .switch-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-top: 12px;
+            letter-spacing: 0.5px;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 100px;
+            height: 52px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #e5e7eb;
+            border: 1px solid #d1d5db;
+            transition: .4s;
+            border-radius: 34px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 42px;
+            width: 42px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+        }
+
+        input:checked+.slider {
+            background-color: rgba(16, 185, 129, 0.15);
+            border-color: var(--accent-glow);
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(48px);
+            background-color: var(--accent-glow);
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-top: 24px;
+        }
+
+        .btn {
+            background: #f9fafb;
+            border: 1px solid #d1d5db;
+            color: var(--text-color);
+            padding: 16px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 16px;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .btn:hover {
+            background: #f3f4f6;
+            border-color: #9ca3af;
+            transform: translateY(-2px);
+        }
+
+        .btn:active {
+            transform: translateY(1px);
+        }
+
+        .btn.active {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: white;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        }
+
+        .btn-center {
+            grid-column: 2;
+        }
+
+        .btn-left {
+            grid-column: 1;
+        }
+
+        .btn-right {
+            grid-column: 3;
+        }
+
+        .slider-group {
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid var(--card-border);
+            text-align: left;
+        }
+
+        .slider-control {
+            margin-bottom: 20px;
+        }
+
+        .slider-control:last-child {
+            margin-bottom: 0;
+        }
+
+        .slider-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .slider-info label {
+            letter-spacing: 0.5px;
+        }
+
+        .slider-info span {
+            color: var(--accent-glow);
+            font-weight: 800;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #e5e7eb;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--accent-glow);
+            box-shadow: 0 0 8px var(--accent-glow);
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .telemetry-group {
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid var(--card-border);
+            text-align: left;
+        }
+        .telemetry-header {
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--accent-glow);
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .telemetry-item {
+            display: flex;
+            flex-direction: column;
+            background: #f9fafb;
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 16px;
+        }
+        .telemetry-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .telemetry-value {
+            font-size: 26px;
+            font-weight: 800;
+            color: var(--text-color);
+        }
+        .telemetry-unit {
+            font-size: 13px;
+            font-weight: 400;
+            color: var(--text-muted);
+            margin-left: 2px;
+        }
+        .imu-table {
+            font-size: 11px;
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .imu-table th {
+            color: var(--text-muted);
+            text-align: left;
+            padding-bottom: 4px;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 600;
+        }
+        .imu-table td {
+            padding: 4px 0;
+            font-family: monospace;
+            color: var(--text-color);
+        }
+        .imu-table td span {
+            color: var(--accent-blue);
+            font-weight: bold;
+        }
+
+        .obstacle-banner {
+            display: none;
+            margin-top: 16px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-align: center;
+        }
+
+        .boost-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        .boost-row label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+        }
+
+        .map-group {
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid var(--card-border);
+        }
+        .map-header {
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--accent-glow);
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #mapCanvas {
+            display: block;
+            width: 100%;
+            height: 280px;
+            border-radius: 14px;
+            border: 1px solid var(--card-border);
+            background: #f9fafb;
+            image-rendering: pixelated;
+        }
+        .pose-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .pose-row span {
+            color: var(--accent-blue);
+            font-weight: 700;
+            font-family: monospace;
+        }
+        .btn-sm {
+            padding: 4px 12px;
+            font-size: 11px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            background: #f9fafb;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-sm:hover {
+            background: #f3f4f6;
+            color: var(--text-color);
+        }
+
+        .auto-btn {
+            width: 100%;
+            margin-top: 16px;
+            padding: 12px;
+            border-radius: 14px;
+            border: 1px solid #6ee7b7;
+            background: #ecfdf5;
+            color: #059669;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.25s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .auto-btn:hover {
+            background: #d1fae5;
+            border-color: #34d399;
+        }
+        .auto-btn.active {
+            background: #059669;
+            border-color: #059669;
+            color: white;
+            box-shadow: 0 0 16px rgba(5, 150, 105, 0.3);
+        }
+        .auto-indicator {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #059669;
+            display: inline-block;
+        }
+        .auto-btn.active .auto-indicator {
+            background: white;
+            box-shadow: 0 0 6px white;
+        }
+
+        /* ── Follow Mode ────────────────────────────────────────────── */
+        .follow-btn {
+            width: 100%;
+            margin-top: 10px;
+            padding: 12px;
+            border-radius: 14px;
+            border: 1px solid #c4b5fd;
+            background: #f5f3ff;
+            color: #7c3aed;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.25s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .follow-btn:hover {
+            background: #ede9fe;
+            border-color: #a78bfa;
+        }
+        .follow-btn.active {
+            background: #7c3aed;
+            border-color: #7c3aed;
+            color: white;
+            box-shadow: 0 0 16px rgba(124, 58, 237, 0.35);
+        }
+        .follow-indicator {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #7c3aed;
+            display: inline-block;
+        }
+        .follow-btn.active .follow-indicator {
+            background: white;
+            box-shadow: 0 0 6px white;
+        }
+
+        /* ── Follower telemetry card ─────────────────────────────────── */
+        .follower-group {
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid var(--card-border);
+            text-align: left;
+        }
+        .camera-preview {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 16px;
+            background: #111827;
+            color: white;
+        }
+        .camera-preview-label {
+            margin-bottom: 8px;
+            color: #cbd5e1;
+            font-size: 11px;
+            text-align: left;
+        }
+        .camera-preview img {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            object-fit: contain;
+            border-radius: 10px;
+            background: #000;
+        }
+        .follower-header {
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #7c3aed;
+            margin-bottom: 14px;
+        }
+        .zone-bar {
+            display: flex;
+            border-radius: 10px;
+            overflow: hidden;
+            height: 36px;
+            border: 1px solid var(--card-border);
+            margin-bottom: 12px;
+        }
+        .zone-seg {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            color: #9ca3af;
+            background: #f9fafb;
+            transition: all 0.2s;
+        }
+        .zone-seg.active-left   { background: #fef9c3; color: #854d0e; }
+        .zone-seg.active-center { background: #dcfce7; color: #166534; }
+        .zone-seg.active-right  { background: #fef9c3; color: #854d0e; }
+        .zone-seg.active-scan   { background: #ede9fe; color: #5b21b6; }
+        .zone-seg.active-stop   { background: #fee2e2; color: #991b1b; }
+        .follower-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .follower-meta span {
+            color: #7c3aed;
+            font-weight: 700;
+            font-family: monospace;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="card">
+            <h1 class="title">Spidey</h1>
+            <p class="subtitle">Quadruped Locomotion Controller</p>
+
+            <div class="status-box">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Standing</span>
+            </div>
+
+            <div class="toggle-container">
+                <label class="switch">
+                    <input type="checkbox" id="walkToggle" onchange="toggleWalk(this)">
+                    <span class="slider"></span>
+                </label>
+                <span class="switch-label" id="toggleLabel">Toggled Stand</span>
+            </div>
+
+            <div class="control-grid">
+                <button class="btn btn-center" onclick="sendCommand('forward')" id="btnForward">Forward</button>
+                <button class="btn btn-left" onclick="sendCommand('left')" id="btnLeft">Turn L</button>
+                <button class="btn" onclick="sendCommand('stop')" id="btnStop">Stop</button>
+                <button class="btn btn-right" onclick="sendCommand('right')" id="btnRight">Turn R</button>
+                <button class="btn btn-center" onclick="sendCommand('backward')" id="btnBackward">Backward</button>
+                <button class="btn btn-center" onclick="sendCommand('stabilize')" id="btnStabilize">Stabilize</button>
+            </div>
+
+            <button class="auto-btn" id="btnAuto" onclick="toggleAuto()">
+                <span class="auto-indicator" id="autoIndicator"></span>
+                <span id="autoLabel">Auto Mode: OFF</span>
+            </button>
+
+            <button class="follow-btn" id="btnFollow" onclick="toggleFollow()">
+                <span class="follow-indicator" id="followIndicator"></span>
+                <span id="followLabel">Follow Mode: OFF</span>
+            </button>
+
+            <div class="slider-group">
+                <div class="slider-control">
+                    <div class="slider-info">
+                        <label for="heightSlider">Body Height</label>
+                        <span><span id="heightValue">0</span></span>
+                    </div>
+                    <input type="range" id="heightSlider" min="-200" max="200" step="10" value="0"
+                        oninput="adjustParams()">
+                </div>
+
+                <div class="slider-control">
+                    <div class="slider-info">
+                        <label for="stepSlider">Step Clearance</label>
+                        <span><span id="stepValue">170</span> µs</span>
+                    </div>
+                    <input type="range" id="stepSlider" min="50" max="450" step="10" value="170"
+                        oninput="adjustParams()">
+                </div>
+
+                <div class="slider-control">
+                    <div class="slider-info">
+                        <label for="strideSlider">Stride Length (Hip Sweep)</label>
+                        <span><span id="strideValue">800</span> µs</span>
+                    </div>
+                    <input type="range" id="strideSlider" min="300" max="1200" step="50" value="800"
+                        oninput="adjustParams()">
+                </div>
+
+                <div class="slider-control">
+                    <div class="slider-info">
+                        <label for="speedSlider">Step Cycle Time (Speed)</label>
+                        <span><span id="speedValue">2.0</span> s</span>
+                    </div>
+                    <input type="range" id="speedSlider" min="0.8" max="3.0" step="0.1" value="2.0"
+                        oninput="adjustParams()">
+                </div>
+
+                <div class="slider-control">
+                    <div class="slider-info">
+                        <label for="obstacleSlider">Obstacle Stop Distance</label>
+                        <span><span id="obstacleValue">120</span> mm</span>
+                    </div>
+                    <input type="range" id="obstacleSlider" min="50" max="400" step="10" value="120"
+                        oninput="adjustParams()">
+                </div>
+
+            </div>
+
+            <div id="obstacleBanner" class="obstacle-banner">Obstacle detected — stopping!</div>
+
+            <!-- ── Follower Telemetry ──────────────────────────────────────── -->
+            <div class="follower-group" id="followerGroup" style="display:none">
+                <div class="follower-header">&#128100; Person Follower</div>
+                <div class="zone-bar">
+                    <div class="zone-seg" id="zoneLeft">&#9664; LEFT</div>
+                    <div class="zone-seg" id="zoneCenter">CENTER</div>
+                    <div class="zone-seg" id="zoneRight">RIGHT &#9654;</div>
+                </div>
+                <div class="follower-meta">
+                    <div>Zone: <span id="followerZone">--</span></div>
+                    <div>Confidence: <span id="followerConf">--</span></div>
+                    <div>Cx: <span id="followerCx">--</span></div>
+                </div>
+            </div>
+
+            <div class="camera-preview">
+                <div class="camera-preview-label">LIVE CAMERA PREVIEW</div>
+                <img id="cameraPreview" alt="Waiting for USB camera...">
+            </div>
+
+            <div class="telemetry-group">
+                <div class="telemetry-header">
+                    <span>Live Telemetry</span>
+                    <span style="color: var(--text-muted); font-size: 10px; font-weight: normal;">5 Hz</span>
+                </div>
+                <div class="telemetry-grid">
+                    <div class="telemetry-item">
+                        <span class="telemetry-label">ToF Distance</span>
+                        <div class="telemetry-value">
+                            <span id="telDistance">--</span><span class="telemetry-unit">mm</span>
+                        </div>
+                    </div>
+                    <div class="telemetry-item">
+                        <span class="telemetry-label">GY-87 IMU (Raw)</span>
+                        <table class="imu-table">
+                            <thead>
+                                <tr>
+                                    <th>Axis</th>
+                                    <th>Accel</th>
+                                    <th>Gyro</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>X</td><td><span id="telAx">--</span></td><td><span id="telGx">--</span></td></tr>
+                                <tr><td>Y</td><td><span id="telAy">--</span></td><td><span id="telGy">--</span></td></tr>
+                                <tr><td>Z</td><td><span id="telAz">--</span></td><td><span id="telGz">--</span></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="map-group">
+                <div class="map-header">
+                    <span>Occupancy Map</span>
+                    <button class="btn-sm" onclick="sendCommand('reset_map')">Reset Map</button>
+                </div>
+                <canvas id="mapCanvas" width="300" height="280"></canvas>
+                <div class="pose-row">
+                    <div>X: <span id="poseX">--</span> m</div>
+                    <div>Y: <span id="poseY">--</span> m</div>
+                    <div>Heading: <span id="poseTh">--</span>&deg;</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let isDragging = false;
+
+        function updateUI(status) {
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            const walkToggle = document.getElementById('walkToggle');
+            const toggleLabel = document.getElementById('toggleLabel');
+
+            if (status.state === 'WALK') {
+                statusDot.classList.add('active');
+                statusText.innerText = 'Walking';
+                walkToggle.checked = true;
+                toggleLabel.innerText = 'Toggled Walk';
+            } else {
+                statusDot.classList.remove('active');
+                statusText.innerText = 'Standing';
+                walkToggle.checked = false;
+                toggleLabel.innerText = 'Toggled Stand';
+            }
+
+            if (!isDragging) {
+                if (status.body_height !== undefined) {
+                    document.getElementById('heightSlider').value = status.body_height;
+                    document.getElementById('heightValue').innerText = status.body_height;
+                }
+                if (status.step_height !== undefined) {
+                    document.getElementById('stepSlider').value = status.step_height;
+                    document.getElementById('stepValue').innerText = status.step_height;
+                }
+                if (status.stride_amp !== undefined) {
+                    document.getElementById('strideSlider').value = status.stride_amp;
+                    document.getElementById('strideValue').innerText = status.stride_amp;
+                }
+                if (status.cycle_time !== undefined) {
+                    document.getElementById('speedSlider').value = status.cycle_time;
+                    document.getElementById('speedValue').innerText = status.cycle_time;
+                }
+            }
+
+            const buttons = {
+                'forward': 'btnForward',
+                'backward': 'btnBackward',
+                'left': 'btnLeft',
+                'right': 'btnRight',
+                'stop': 'btnStop',
+                'stabilize': 'btnStabilize'
+            };
+
+            Object.keys(buttons).forEach(cmd => {
+                const btn = document.getElementById(buttons[cmd]);
+                if (btn) {
+                    if (status.active_cmd === cmd) {
+                        btn.classList.add('active');
+                    } else {
+                        btn.classList.remove('active');
+                    }
+                }
+            });
+
+            if (status.sensor_distance !== undefined) {
+                document.getElementById('telDistance').innerText =
+                    status.sensor_distance >= 0 ? status.sensor_distance : 'N/A';
+            }
+            if (status.sensor_ax !== undefined) {
+                document.getElementById('telAx').innerText = status.sensor_ax;
+                document.getElementById('telAy').innerText = status.sensor_ay;
+                document.getElementById('telAz').innerText = status.sensor_az;
+                document.getElementById('telGx').innerText = status.sensor_gx;
+                document.getElementById('telGy').innerText = status.sensor_gy;
+                document.getElementById('telGz').innerText = status.sensor_gz;
+            }
+            if (status.pose_x !== undefined) {
+                document.getElementById('poseX').innerText = status.pose_x;
+                document.getElementById('poseY').innerText = status.pose_y;
+                document.getElementById('poseTh').innerText = status.pose_th;
+            }
+            if (status.auto_mode !== undefined) {
+                const btn   = document.getElementById('btnAuto');
+                const label = document.getElementById('autoLabel');
+                if (status.auto_mode) {
+                    btn.classList.add('active');
+                    label.innerText = 'Auto Mode: ON';
+                } else {
+                    btn.classList.remove('active');
+                    label.innerText = 'Auto Mode: OFF';
+                }
+            }
+            if (status.follow_mode !== undefined) {
+                const btn   = document.getElementById('btnFollow');
+                const label = document.getElementById('followLabel');
+                const group = document.getElementById('followerGroup');
+                if (status.follow_mode) {
+                    btn.classList.add('active');
+                    label.innerText = 'Follow Mode: ON';
+                    group.style.display = 'block';
+                } else {
+                    btn.classList.remove('active');
+                    label.innerText = 'Follow Mode: OFF';
+                    group.style.display = 'none';
+                }
+            }
+            // Follower telemetry
+            if (status.follower_zone !== undefined) {
+                const zone = status.follower_zone;
+                document.getElementById('followerZone').innerText = zone;
+                document.getElementById('followerConf').innerText =
+                    (status.follower_conf * 100).toFixed(0) + '%';
+                document.getElementById('followerCx').innerText =
+                    status.follower_cx !== undefined ? status.follower_cx.toFixed(3) : '--';
+
+                // Highlight active zone segment
+                const segs = {
+                    'LEFT':      'zoneLeft',
+                    'CENTER':    'zoneCenter',
+                    'RIGHT':     'zoneRight',
+                    'SCAN':      'zoneCenter',
+                    'TOO_CLOSE': 'zoneCenter',
+                    'NONE':      null,
+                };
+                ['zoneLeft','zoneCenter','zoneRight'].forEach(id => {
+                    const el = document.getElementById(id);
+                    el.className = 'zone-seg';
+                    if (zone === 'SCAN')      el.classList.add('active-scan');
+                    if (zone === 'TOO_CLOSE') el.classList.add('active-stop');
+                });
+                const activeId = segs[zone];
+                if (activeId) {
+                    const el = document.getElementById(activeId);
+                    if (zone === 'LEFT')   el.classList.add('active-left');
+                    if (zone === 'CENTER') el.classList.add('active-center');
+                    if (zone === 'RIGHT')  el.classList.add('active-right');
+                }
+            }
+        }
+
+        socket.on('status_update', (data) => {
+            updateUI(data);
+        });
+
+        socket.on('camera_preview', (data) => {
+            if (data && data.jpeg) {
+                document.getElementById('cameraPreview').src =
+                    'data:image/jpeg;base64,' + data.jpeg;
+            }
+        });
+
+        function sendCommand(cmd) {
+            socket.emit('control_cmd', { cmd: cmd });
+        }
+
+        function toggleWalk(checkbox) {
+            if (checkbox.checked) {
+                sendCommand('forward');
+            } else {
+                sendCommand('stop');
+            }
+        }
+
+        function toggleAuto() {
+            socket.emit('toggle_auto', {});
+        }
+
+        function toggleFollow() {
+            socket.emit('toggle_follow', {});
+        }
+
+        function adjustParams() {
+            isDragging = true;
+            const body_height = document.getElementById('heightSlider').value;
+            const step_height = document.getElementById('stepSlider').value;
+            const stride_amp = document.getElementById('strideSlider').value;
+            const cycle_time = document.getElementById('speedSlider').value;
+            const obstacle_threshold = document.getElementById('obstacleSlider').value;
+
+            document.getElementById('heightValue').innerText = body_height;
+            document.getElementById('stepValue').innerText = step_height;
+            document.getElementById('strideValue').innerText = stride_amp;
+            document.getElementById('speedValue').innerText = cycle_time;
+            document.getElementById('obstacleValue').innerText = obstacle_threshold;
+
+            socket.emit('adjust_params', {
+                body_height: parseFloat(body_height),
+                step_height: parseFloat(step_height),
+                stride_amp: parseFloat(stride_amp),
+                cycle_time: parseFloat(cycle_time),
+                obstacle_threshold: parseFloat(obstacle_threshold)
+            });
+
+            clearTimeout(window.dragTimeout);
+            window.dragTimeout = setTimeout(() => { isDragging = false; }, 300);
+        }
+
+        socket.on('obstacle_alert', () => {
+            const banner = document.getElementById('obstacleBanner');
+            banner.style.display = 'block';
+            clearTimeout(window.bannerTimeout);
+            window.bannerTimeout = setTimeout(() => { banner.style.display = 'none'; }, 4000);
+        });
+
+        const mapCanvas = document.getElementById('mapCanvas');
+        const mapCtx    = mapCanvas.getContext('2d');
+        let   mapData   = { occupied: [], robot: [50, 50], cells: 100 };
+
+        function renderMap() {
+            const W = mapCanvas.width;
+            const H = mapCanvas.height;
+            const N = mapData.cells || 100;
+            const cw = W / N;
+            const ch = H / N;
+
+            mapCtx.fillStyle = '#f9fafb';
+            mapCtx.fillRect(0, 0, W, H);
+
+            mapCtx.strokeStyle = '#e5e7eb';
+            mapCtx.lineWidth = 0.5;
+            for (let i = 0; i <= N; i += 10) {
+                mapCtx.beginPath();
+                mapCtx.moveTo(i * cw, 0); mapCtx.lineTo(i * cw, H);
+                mapCtx.moveTo(0, i * ch); mapCtx.lineTo(W, i * ch);
+                mapCtx.stroke();
+            }
+
+            mapCtx.fillStyle = '#ef4444';
+            (mapData.occupied || []).forEach(([c, r]) => {
+                mapCtx.fillRect(c * cw, r * ch, Math.max(cw, 2), Math.max(ch, 2));
+            });
+
+            const [rc, rr] = mapData.robot || [50, 50];
+            const rx = (rc + 0.5) * cw;
+            const ry = (rr + 0.5) * ch;
+            const rad = 4;
+
+            mapCtx.fillStyle = '#2563eb';
+            mapCtx.beginPath();
+            mapCtx.arc(rx, ry, rad, 0, Math.PI * 2);
+            mapCtx.fill();
+        }
+
+        socket.on('map_update', (data) => {
+            mapData = data;
+            renderMap();
+        });
+
+        renderMap();
+    </script>
+</body>
+
+</html>

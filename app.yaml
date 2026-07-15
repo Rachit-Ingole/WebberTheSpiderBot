@@ -1,0 +1,9 @@
+name: Spidey
+description: ""
+ports:
+  - 7000
+bricks:
+  - arduino:web_ui: {}
+  - arduino:video_object_detection:
+      model: face-detection
+icon: 😀
