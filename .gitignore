@@ -4,5 +4,6 @@ __pycache__/
 *.py[cod]
 .cache/
 .pytest_cache/
+data/
 known_people/*
 !known_people/README.md
