@@ -2,22 +2,16 @@ import time
 import math
 import threading
 import base64
-from arduino.app_utils import App
+from arduino.app_utils import App, Bridge
 from arduino.app_bricks.web_ui import WebUI
 from robot import SpiderBot
 from person_follower import PersonFollower
+from memory_store import MemoryStore
+from qwen_chat import QwenChat
+from task_executor import TaskExecutor
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CAMERA-ONLY TEST SWITCH
-# True  = camera, face recognition, preview, and console logs only.
-# False = full SpiderBot locomotion application below.
-# Set this back to False when the camera test is complete.
-# ═══════════════════════════════════════════════════════════════════════════
-CAMERA_ONLY = True
-
-# Set False when the USB camera is unavailable. The robot, OLED, WebUI,
-# sensors, and manual controls still run; only face detection/follow mode is
-# disabled. Set True again when a working camera is connected.
+# Set CAMERA_ENABLED to True only when the USB camera is connected.
+CAMERA_ONLY = False
 CAMERA_ENABLED = False
 
 if CAMERA_ONLY:
@@ -26,6 +20,42 @@ if CAMERA_ONLY:
         run_camera_test()
     else:
         ui = WebUI()
+        memory = MemoryStore()
+        qwen = QwenChat(memory)
+        room_state = {"value": "unknown"}
+
+        def ask_qwen_without_camera(_sid, data):
+            question = str(data.get("question", "")).strip()
+            def answer_question():
+                answer = qwen.ask(question)
+                ui.send_message("chat_response", {"question": question, "answer": answer})
+            threading.Thread(target=answer_question, daemon=True).start()
+
+        ui.on_message("chat_question", ask_qwen_without_camera)
+
+        def set_display_face_without_camera(_sid, data):
+            states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+            face = str(data.get("face", "idle")).strip().lower()
+            if face not in states:
+                return
+            Bridge.call("setDisplayState", states[face])
+            ui.send_message("display_face_update", {"face": face})
+            print(f"[OLED] Face set to {face}", flush=True)
+
+        def set_room_without_camera(_sid, data):
+            room = str(data.get("room", "unknown")).strip().lower()[:64] or "unknown"
+            room_state["value"] = room
+            print(f"[CameraTest] Manual room set to {room}", flush=True)
+            ui.send_message("room_update", {"room": room})
+
+        ui.on_message("set_room", set_room_without_camera)
+        ui.on_message("set_display_face", set_display_face_without_camera)
+        def save_rooms_without_camera(_sid, data):
+            rooms = memory.replace_rooms(data.get("rooms", []))
+            ui.send_message("rooms_update", {"rooms": rooms})
+            print(f"[CameraTest] Saved {len(rooms)} manual room boxes", flush=True)
+        ui.on_message("save_rooms", save_rooms_without_camera)
+        ui.send_message("rooms_update", {"rooms": memory.list_rooms()})
         print("[CameraTest] Camera disabled. Running without camera.", flush=True)
     App.run()
     raise SystemExit
@@ -33,12 +63,67 @@ if CAMERA_ONLY:
 # ── Robot & UI ─────────────────────────────────────────────────────────────
 robot = SpiderBot()
 robot.stand()
+print(f"[DEBUG][Startup] robot constructed; state={robot.state}; "
+      f"camera_only={CAMERA_ONLY}; camera_enabled={CAMERA_ENABLED}", flush=True)
 
 active_cmd = "stop"
 ui = WebUI()
 
 # ── Follow Mode ──────────────────────────────────────────────────────────────
 follow_mode = False
+current_room = "unknown"
+memory = MemoryStore()
+qwen = QwenChat(memory)
+autonomy_enabled = False
+
+def task_set_room(name):
+    global current_room
+    current_room = str(name).strip().lower()[:64] or "unknown"
+    ui.send_message("room_update", {"room": current_room})
+
+def task_set_face(face):
+    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+    if face in states:
+        Bridge.call("setDisplayState", states[face])
+        ui.send_message("display_face_update", {"face": face})
+
+def handle_display_face(sid, data):
+    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+    face = str(data.get("face", "idle")).strip().lower()
+    if face not in states:
+        return
+    Bridge.call("setDisplayState", states[face])
+    ui.send_message("display_face_update", {"face": face})
+    print(f"[OLED] Face set to {face}")
+
+def handle_chat_question(sid, data):
+    question = str(data.get("question", "")).strip()
+    def answer_question():
+        answer = qwen.ask(question)
+        ui.send_message("chat_response", {"question": question, "answer": answer})
+    threading.Thread(target=answer_question, daemon=True).start()
+
+def handle_toggle_autonomy(sid, data):
+    global autonomy_enabled
+    autonomy_enabled = not autonomy_enabled
+    print(f"[Task] autonomy {'enabled' if autonomy_enabled else 'disabled'}", flush=True)
+    ui.send_message("autonomy_update", {"enabled": autonomy_enabled})
+
+def handle_task_request(sid, data):
+    request = str(data.get("task", "")).strip()
+    if not request:
+        return
+    def plan_and_run():
+        plan = qwen.plan_task(request)
+        ui.send_message("task_plan", plan)
+        if not autonomy_enabled:
+            ui.send_message("task_update", {"status": "waiting", "detail": "Enable Autonomous Tasks to run this plan."})
+            return
+        executor.execute(plan)
+    threading.Thread(target=plan_and_run, daemon=True).start()
+
+def handle_cancel_task(sid, data):
+    executor.cancel()
 # PersonFollower is instantiated lazily after sensor_distance is defined below
 
 _last_preview_sent = 0.0
@@ -157,6 +242,7 @@ def broadcast_status_packet():
             "active_cmd":      active_cmd,
             "auto_mode":       auto_mode,
             "follow_mode":     follow_mode,
+            "current_room":    current_room,
             "body_height":     robot.body_height,
             "step_height":     robot.step_height,
             "stride_amp":      robot.stride_amp,
@@ -186,6 +272,8 @@ def broadcast_status_packet():
 def handle_control(sid, data):
     global active_cmd, auto_mode, follow_mode
     cmd = data.get('cmd', '')
+    print(f"[DEBUG][Control] received cmd={cmd!r} state_before={robot.state} "
+          f"active_before={active_cmd}", flush=True)
 
     # Any manual command disables auto mode and follow mode
     if cmd in ('forward', 'backward', 'left', 'right', 'stop'):
@@ -223,6 +311,8 @@ def handle_control(sid, data):
         _reset_map()
 
     broadcast_status_packet()
+    print(f"[DEBUG][Control] completed cmd={cmd!r} state_after={robot.state} "
+          f"active_after={active_cmd} vx={robot.vx} omega={robot.omega}", flush=True)
 
 def handle_toggle_auto(sid, data):
     """Toggle autonomous patrol mode on/off."""
@@ -268,6 +358,20 @@ def handle_toggle_follow(sid, data):
         print("[SpiderBot] Follow mode OFF")
     broadcast_status_packet()
 
+def handle_set_room(sid, data):
+    """Set the manually selected room used for future memory events."""
+    global current_room
+    value = str(data.get("room", "unknown")).strip().lower()
+    current_room = value[:64] or "unknown"
+    print(f"[Spidey] Manual room set to {current_room}")
+    ui.send_message("room_update", {"room": current_room})
+    broadcast_status_packet()
+
+def handle_save_rooms(sid, data):
+    rooms = memory.replace_rooms(data.get("rooms", []))
+    ui.send_message("rooms_update", {"rooms": rooms})
+    print(f"[Spidey] Saved {len(rooms)} manual room boxes")
+
 def handle_adjust(sid, data):
     global OBSTACLE_THRESHOLD
     body_height        = data.get('body_height')
@@ -291,6 +395,16 @@ ui.on_message("control_cmd",   handle_control)
 ui.on_message("adjust_params", handle_adjust)
 ui.on_message("toggle_auto",   handle_toggle_auto)
 ui.on_message("toggle_follow", handle_toggle_follow)
+ui.on_message("set_room",      handle_set_room)
+ui.on_message("set_display_face", handle_display_face)
+ui.on_message("chat_question", handle_chat_question)
+ui.on_message("toggle_autonomy", handle_toggle_autonomy)
+ui.on_message("task_request", handle_task_request)
+ui.on_message("cancel_task", handle_cancel_task)
+ui.on_message("save_rooms",    handle_save_rooms)
+ui.send_message("rooms_update", {"rooms": memory.list_rooms()})
+
+executor = TaskExecutor(robot, task_set_room, task_set_face, memory, ui)
 
 # ── PersonFollower (initialised here so sensor_distance lambda is valid) ──────
 follower = None
@@ -320,6 +434,7 @@ def broadcast_loop():
 
     from arduino.app_utils import Bridge
     last_tick = time.time()
+    last_sensor_error_log = 0.0
 
     while True:
         now = time.time()
@@ -392,8 +507,10 @@ def broadcast_loop():
                     except Exception:
                         pass
 
-        except Exception:
-            pass
+        except Exception as exc:
+            if now - last_sensor_error_log >= 2.0:
+                last_sensor_error_log = now
+                print(f"[DEBUG][Sensors] read/update failed: {exc}", flush=True)
 
         broadcast_status_packet()
 

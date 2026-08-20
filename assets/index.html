@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Spidey Quadruped Control</title>
+    <title>Webber Quadruped Control</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <style>
@@ -37,7 +37,7 @@
 
         .container {
             width: 100%;
-            max-width: 480px;
+            max-width: 1420px;
             padding: 24px;
         }
 
@@ -50,6 +50,64 @@
             text-align: center;
             position: relative;
         }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+            gap: 28px;
+            text-align: left;
+        }
+        .dashboard-column { min-width: 0; }
+        .room-card {
+            margin-top: 20px;
+            padding: 16px;
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            background: #f8fafc;
+        }
+        .room-card label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-muted);
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        .room-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .room-row select {
+            min-width: 0;
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            background: white;
+            color: var(--text-color);
+            font: inherit;
+        }
+        .room-row button {
+            padding: 10px 14px;
+            border: 0;
+            border-radius: 10px;
+            background: var(--accent-blue);
+            color: white;
+            cursor: pointer;
+            font-weight: 700;
+        }
+        .room-current { margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+        .room-map-tools { margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .room-map-hint { color: var(--text-muted); font-size: 11px; }
+        #mapCanvas.room-drawing { cursor: crosshair; }
+        .chat-card { margin-top: 20px; padding: 16px; border: 1px solid var(--card-border); border-radius: 16px; background: #f8fafc; }
+        .chat-card label { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 11px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
+        .chat-log { height: 180px; overflow-y: auto; padding: 10px; border-radius: 10px; background: #111827; color: #e5e7eb; font-size: 12px; text-align: left; }
+        .chat-message { margin-bottom: 10px; white-space: pre-wrap; }
+        .chat-message.user { color: #93c5fd; }
+        .chat-message.bot { color: #a7f3d0; }
+        .chat-input-row { display: flex; gap: 8px; margin-top: 8px; }
+        .chat-input { min-width: 0; flex: 1; padding: 10px 12px; border: 1px solid var(--card-border); border-radius: 10px; font: inherit; }
+        .task-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+        .task-status { margin-top: 8px; color: var(--text-muted); font-size: 11px; }
 
         .title {
             font-size: 28px;
@@ -565,19 +623,27 @@
             font-weight: 700;
             font-family: monospace;
         }
+
+        @media (max-width: 900px) {
+            .container { max-width: 680px; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 
 <body>
     <div class="container">
         <div class="card">
-            <h1 class="title">Spidey</h1>
+            <h1 class="title">Webber</h1>
             <p class="subtitle">Quadruped Locomotion Controller</p>
 
             <div class="status-box">
                 <span class="status-dot" id="statusDot"></span>
                 <span id="statusText">Standing</span>
             </div>
+
+            <div class="dashboard-grid">
+            <div class="dashboard-column">
 
             <div class="toggle-container">
                 <label class="switch">
@@ -605,6 +671,38 @@
                 <span class="follow-indicator" id="followIndicator"></span>
                 <span id="followLabel">Follow Mode: OFF</span>
             </button>
+
+            <div class="room-card">
+                <label>OLED face test</label>
+                <div class="room-row">
+                    <button class="btn-sm" onclick="setDisplayFace('idle')">Neutral</button>
+                    <button class="btn-sm" onclick="setDisplayFace('happy')">Happy</button>
+                    <button class="btn-sm" onclick="setDisplayFace('alert')">Alert</button>
+                    <button class="btn-sm" onclick="setDisplayFace('left')">Look left</button>
+                    <button class="btn-sm" onclick="setDisplayFace('right')">Look right</button>
+                </div>
+                <div class="room-current">OLED: <strong id="displayFace">neutral</strong></div>
+            </div>
+
+            <div class="chat-card">
+                <label>Ask Webber</label>
+                <div class="chat-log" id="chatLog"><div class="chat-message bot">Webber memory chat is ready.</div></div>
+                <div class="chat-input-row">
+                    <input class="chat-input" id="chatInput" placeholder="Where was Rachit last seen?"
+                        onkeydown="if (event.key === 'Enter') askSpidey()">
+                    <button class="btn-sm" onclick="askSpidey()">Ask</button>
+                </div>
+                <div class="task-actions">
+                    <button class="btn-sm" id="autonomyButton" onclick="toggleAutonomy()">Autonomous Tasks: OFF</button>
+                    <button class="btn-sm" onclick="cancelTask()">Cancel task</button>
+                </div>
+                <div class="chat-input-row">
+                    <input class="chat-input" id="taskInput" placeholder="Run two circles around the room"
+                        onkeydown="if (event.key === 'Enter') sendTask()">
+                    <button class="btn-sm" onclick="sendTask()">Run task</button>
+                </div>
+                <div class="task-status" id="taskStatus">Autonomous tasks are disabled.</div>
+            </div>
 
             <div class="slider-group">
                 <div class="slider-control">
@@ -657,6 +755,21 @@
             <div id="obstacleBanner" class="obstacle-banner">Obstacle detected — stopping!</div>
 
             <!-- ── Follower Telemetry ──────────────────────────────────────── -->
+            </div>
+
+            <div class="dashboard-column">
+            <div class="room-card">
+                <label for="roomSelect">Manual room context</label>
+                <div class="room-row">
+                    <select id="roomSelect">
+                        <option value="unknown">Unknown</option>
+                    </select>
+                    <button onclick="setRoom()">Set room</button>
+                </div>
+                <div class="room-current">Current: <strong id="currentRoom">unknown</strong></div>
+                <div class="room-map-hint">Draw room boundaries on the occupancy map below. You can add multiple boxes.</div>
+            </div>
+
             <div class="follower-group" id="followerGroup" style="display:none">
                 <div class="follower-header">&#128100; Person Follower</div>
                 <div class="zone-bar">
@@ -711,14 +824,21 @@
             <div class="map-group">
                 <div class="map-header">
                     <span>Occupancy Map</span>
-                    <button class="btn-sm" onclick="sendCommand('reset_map')">Reset Map</button>
+                    <div>
+                        <button class="btn-sm" onclick="sendCommand('reset_map')">Reset Map</button>
+                        <button class="btn-sm" id="roomDrawButton" onclick="toggleRoomDrawing()">Add room box</button>
+                        <button class="btn-sm" onclick="saveRoomRegions()">Save rooms</button>
+                    </div>
                 </div>
-                <canvas id="mapCanvas" width="300" height="280"></canvas>
+                <div class="room-map-hint" id="roomDrawHint">Click “Add room box”, then drag a rectangle and name it.</div>
+                <canvas id="mapCanvas" width="560" height="420"></canvas>
                 <div class="pose-row">
                     <div>X: <span id="poseX">--</span> m</div>
                     <div>Y: <span id="poseY">--</span> m</div>
                     <div>Heading: <span id="poseTh">--</span>&deg;</div>
                 </div>
+            </div>
+            </div>
             </div>
         </div>
     </div>
@@ -743,6 +863,11 @@
                 statusText.innerText = 'Standing';
                 walkToggle.checked = false;
                 toggleLabel.innerText = 'Toggled Stand';
+            }
+
+            if (status.current_room) {
+                document.getElementById('currentRoom').innerText = status.current_room;
+                document.getElementById('roomSelect').value = status.current_room;
             }
 
             if (!isDragging) {
@@ -875,6 +1000,89 @@
             socket.emit('control_cmd', { cmd: cmd });
         }
 
+        function setRoom() {
+            const room = document.getElementById('roomSelect').value;
+            socket.emit('set_room', { room: room });
+            document.getElementById('currentRoom').innerText = room;
+        }
+
+        function setDisplayFace(face) {
+            socket.emit('set_display_face', { face: face });
+        }
+
+        socket.on('display_face_update', (data) => {
+            if (data && data.face) {
+                document.getElementById('displayFace').innerText = data.face;
+            }
+        });
+
+        function appendChatMessage(kind, text) {
+            const log = document.getElementById('chatLog');
+            const message = document.createElement('div');
+            message.className = 'chat-message ' + kind;
+            message.innerText = (kind === 'user' ? 'You: ' : 'Webber: ') + text;
+            log.appendChild(message);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function askSpidey() {
+            const input = document.getElementById('chatInput');
+            const question = input.value.trim();
+            if (!question) return;
+            appendChatMessage('user', question);
+            input.value = '';
+            socket.emit('chat_question', { question: question });
+        }
+
+        socket.on('chat_response', (data) => {
+            appendChatMessage('bot', data && data.answer ? data.answer : 'No response received.');
+        });
+
+        function toggleAutonomy() { socket.emit('toggle_autonomy', {}); }
+        function cancelTask() { socket.emit('cancel_task', {}); }
+        function sendTask() {
+            const input = document.getElementById('taskInput');
+            const task = input.value.trim();
+            if (!task) return;
+            appendChatMessage('user', 'Task: ' + task);
+            input.value = '';
+            socket.emit('task_request', { task: task });
+        }
+        socket.on('autonomy_update', (data) => {
+            const enabled = !!(data && data.enabled);
+            document.getElementById('autonomyButton').innerText =
+                'Autonomous Tasks: ' + (enabled ? 'ON' : 'OFF');
+            document.getElementById('taskStatus').innerText = enabled
+                ? 'Autonomous tasks enabled.' : 'Autonomous tasks are disabled.';
+        });
+        socket.on('task_plan', (data) => {
+            if (data && data.message) appendChatMessage('bot', 'Plan: ' + data.message);
+        });
+        socket.on('task_update', (data) => {
+            if (data) document.getElementById('taskStatus').innerText =
+                'Task ' + (data.status || '') + (data.detail ? ': ' + data.detail : '');
+        });
+
+        socket.on('room_update', (data) => {
+            if (data && data.room) {
+                document.getElementById('currentRoom').innerText = data.room;
+                document.getElementById('roomSelect').value = data.room;
+            }
+        });
+
+        function populateRoomChoices() {
+            const select = document.getElementById('roomSelect');
+            const current = select.value;
+            select.innerHTML = '<option value="unknown">Unknown</option>';
+            roomRegions.forEach(room => {
+                const option = document.createElement('option');
+                option.value = room.name;
+                option.textContent = room.name;
+                select.appendChild(option);
+            });
+            select.value = [...select.options].some(o => o.value === current) ? current : 'unknown';
+        }
+
         function toggleWalk(checkbox) {
             if (checkbox.checked) {
                 sendCommand('forward');
@@ -927,6 +1135,71 @@
         const mapCanvas = document.getElementById('mapCanvas');
         const mapCtx    = mapCanvas.getContext('2d');
         let   mapData   = { occupied: [], robot: [50, 50], cells: 100 };
+        let   roomRegions = [];
+        let   roomDrawing = false;
+        let   roomStart = null;
+        let   roomDraft = null;
+
+        function canvasToCell(event) {
+            const rect = mapCanvas.getBoundingClientRect();
+            const n = mapData.cells || 100;
+            return {
+                x: Math.max(0, Math.min(n, Math.round((event.clientX - rect.left) / rect.width * n))),
+                y: Math.max(0, Math.min(n, Math.round((event.clientY - rect.top) / rect.height * n)))
+            };
+        }
+
+        function normalizedRoom(a, b, name) {
+            return { name: name, x1: Math.min(a.x, b.x), y1: Math.min(a.y, b.y),
+                x2: Math.max(a.x, b.x), y2: Math.max(a.y, b.y) };
+        }
+
+        function toggleRoomDrawing() {
+            roomDrawing = !roomDrawing;
+            mapCanvas.classList.toggle('room-drawing', roomDrawing);
+            document.getElementById('roomDrawButton').innerText = roomDrawing ? 'Cancel box' : 'Add room box';
+            document.getElementById('roomDrawHint').innerText = roomDrawing
+                ? 'Drag across the map to draw a room rectangle.'
+                : 'Click “Add room box”, then drag a rectangle and name it.';
+        }
+
+        mapCanvas.addEventListener('mousedown', event => {
+            if (!roomDrawing) return;
+            roomStart = canvasToCell(event);
+            roomDraft = { ...roomStart, x2: roomStart.x, y2: roomStart.y };
+            renderMap();
+        });
+        window.addEventListener('mousemove', event => {
+            if (!roomDrawing || !roomStart) return;
+            const point = canvasToCell(event);
+            roomDraft = { ...roomStart, x2: point.x, y2: point.y };
+            renderMap();
+        });
+        window.addEventListener('mouseup', event => {
+            if (!roomDrawing || !roomStart) return;
+            const point = canvasToCell(event);
+            const region = normalizedRoom(roomStart, point, '');
+            roomStart = null;
+            roomDraft = null;
+            if (region.x2 - region.x1 < 2 || region.y2 - region.y1 < 2) {
+                renderMap();
+                return;
+            }
+            const name = window.prompt('Name this room:');
+            if (name && name.trim()) {
+                region.name = name.trim().slice(0, 64);
+                roomRegions = roomRegions.filter(r => r.name.toLowerCase() !== region.name.toLowerCase());
+                roomRegions.push(region);
+                populateRoomChoices();
+            }
+            renderMap();
+        });
+
+        function saveRoomRegions() {
+            socket.emit('save_rooms', { rooms: roomRegions });
+            document.getElementById('roomDrawHint').innerText =
+                `${roomRegions.length} room box(es) saved.`;
+        }
 
         function renderMap() {
             const W = mapCanvas.width;
@@ -952,6 +1225,33 @@
                 mapCtx.fillRect(c * cw, r * ch, Math.max(cw, 2), Math.max(ch, 2));
             });
 
+            roomRegions.forEach((room, index) => {
+                const colors = ['#7c3aed', '#0891b2', '#d97706', '#db2777', '#16a34a'];
+                const color = colors[index % colors.length];
+                mapCtx.fillStyle = color + '22';
+                mapCtx.fillRect(room.x1 * cw, room.y1 * ch,
+                    (room.x2 - room.x1) * cw, (room.y2 - room.y1) * ch);
+                mapCtx.strokeStyle = color;
+                mapCtx.lineWidth = 2;
+                mapCtx.strokeRect(room.x1 * cw, room.y1 * ch,
+                    (room.x2 - room.x1) * cw, (room.y2 - room.y1) * ch);
+                mapCtx.fillStyle = color;
+                mapCtx.font = 'bold 12px Outfit, sans-serif';
+                mapCtx.fillText(room.name, room.x1 * cw + 4, room.y1 * ch + 14);
+            });
+
+            if (roomDraft) {
+                const x1 = Math.min(roomDraft.x, roomDraft.x2);
+                const y1 = Math.min(roomDraft.y, roomDraft.y2);
+                const x2 = Math.max(roomDraft.x, roomDraft.x2);
+                const y2 = Math.max(roomDraft.y, roomDraft.y2);
+                mapCtx.fillStyle = '#2563eb22';
+                mapCtx.fillRect(x1 * cw, y1 * ch, (x2 - x1) * cw, (y2 - y1) * ch);
+                mapCtx.strokeStyle = '#2563eb';
+                mapCtx.lineWidth = 2;
+                mapCtx.strokeRect(x1 * cw, y1 * ch, (x2 - x1) * cw, (y2 - y1) * ch);
+            }
+
             const [rc, rr] = mapData.robot || [50, 50];
             const rx = (rc + 0.5) * cw;
             const ry = (rr + 0.5) * ch;
@@ -965,6 +1265,12 @@
 
         socket.on('map_update', (data) => {
             mapData = data;
+            renderMap();
+        });
+
+        socket.on('rooms_update', (data) => {
+            roomRegions = (data && data.rooms) || [];
+            populateRoomChoices();
             renderMap();
         });
 
