@@ -1,12 +1,17 @@
 """Camera-only test mode: no robot, servo, ToF, or MCU control."""
 
 import base64
+import os
+import threading
 import time
 
 import cv2
+from arduino.app_utils import Bridge
 from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 from arduino.app_bricks.web_ui import WebUI
+from memory_store import MemoryStore
 from telegram_notifier import TelegramNotifier
+from qwen_chat import QwenChat
 
 LEFT_END = 0.38
 RIGHT_START = 0.62
@@ -19,7 +24,46 @@ def run_camera_test():
     last_preview = 0.0
     last_no_face_log = 0.0
     first_payload = True
+    last_memory_key = None
     telegram = TelegramNotifier()
+    memory = MemoryStore()
+    qwen = QwenChat(memory)
+    room = os.getenv("SPIDEY_CURRENT_ROOM", "unknown")
+
+    def ask_qwen(_sid, data):
+        question = str(data.get("question", "")).strip()
+        def answer_question():
+            ui.send_message("chat_response", {
+                "question": question,
+                "answer": qwen.ask(question),
+            })
+        threading.Thread(target=answer_question, daemon=True).start()
+
+    def set_display_face(_sid, data):
+        states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+        face = str(data.get("face", "idle")).strip().lower()
+        if face not in states:
+            return
+        Bridge.call("setDisplayState", states[face])
+        ui.send_message("display_face_update", {"face": face})
+        print(f"[OLED] Face set to {face}", flush=True)
+
+    def set_room(_sid, data):
+        nonlocal room
+        room = str(data.get("room", "unknown")).strip().lower()[:64] or "unknown"
+        print(f"[CameraTest] Manual room set to {room}", flush=True)
+        ui.send_message("room_update", {"room": room})
+
+    def save_rooms(_sid, data):
+        rooms = memory.replace_rooms(data.get("rooms", []))
+        ui.send_message("rooms_update", {"rooms": rooms})
+        print(f"[CameraTest] Saved {len(rooms)} manual room boxes", flush=True)
+
+    ui.on_message("set_room", set_room)
+    ui.on_message("set_display_face", set_display_face)
+    ui.on_message("chat_question", ask_qwen)
+    ui.on_message("save_rooms", save_rooms)
+    ui.send_message("rooms_update", {"rooms": memory.list_rooms()})
 
     try:
         from face_recognizer import FaceRecognizer
@@ -36,7 +80,7 @@ def run_camera_test():
     )
 
     def on_frame(detections, frame=None):
-        nonlocal last_preview, last_no_face_log, first_payload
+        nonlocal last_preview, last_no_face_log, first_payload, last_memory_key
 
         try:
             if first_payload:
@@ -64,6 +108,7 @@ def run_camera_test():
                 faces = []
 
             if len(faces) == 0:
+                last_memory_key = None
                 now = time.monotonic()
                 if now - last_no_face_log >= 2.0:
                     print("[CameraTest] No face visible — scanning.", flush=True)
@@ -82,8 +127,25 @@ def run_camera_test():
 
             if name:
                 identity = f"{name} detected"
+                memory_key = name.lower()
+                if memory_key != last_memory_key:
+                    memory.log_event(
+                        "person_seen",
+                        person_name=name,
+                        room=room,
+                        confidence=score,
+                        details={"source": "uno_q_camera"},
+                    )
             else:
                 identity = "INTRUDER detected"
+                memory_key = "INTRUDER"
+                if memory_key != last_memory_key:
+                    memory.log_event(
+                        "intruder_detected",
+                        room=room,
+                        confidence=confidence,
+                        details={"source": "uno_q_camera"},
+                    )
                 image = frame
                 if not isinstance(image, (bytes, bytearray, memoryview)):
                     encoded, jpeg = cv2.imencode(".jpg", image)
@@ -93,6 +155,7 @@ def run_camera_test():
                     location="UNO Q camera",
                     image=image,
                 )
+            last_memory_key = memory_key
 
             width = (recognizer.frame_width(frame) or 640
                      if recognizer and frame is not None else 640)

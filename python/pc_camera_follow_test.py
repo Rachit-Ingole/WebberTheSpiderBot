@@ -5,6 +5,7 @@ the command that the robot would use based on the face position.
 """
 
 from collections import deque
+import os
 from pathlib import Path
 from time import strftime
 
@@ -12,6 +13,7 @@ import cv2
 import numpy as np
 
 from face_recognizer import FaceRecognizer
+from memory_store import MemoryStore
 from telegram_notifier import TelegramNotifier
 
 
@@ -44,6 +46,9 @@ def main():
     last_command = None
     last_status = None
     telegram = TelegramNotifier()
+    memory = MemoryStore()
+    room = os.getenv("SPIDEY_CURRENT_ROOM", "unknown")
+    print(f"[PCFollowTest] Memory room: {room}")
     print("[PCFollowTest] Camera opened. Press q to quit.")
 
     while True:
@@ -84,6 +89,21 @@ def main():
                 location="PC webcam",
                 image=jpeg.tobytes() if encoded else None,
             )
+        if status != last_status and status != "NO FACE":
+            if status == "INTRUDER":
+                memory.log_event(
+                    "intruder_detected",
+                    room=room,
+                    details={"source": "pc_webcam", "command": current_command},
+                )
+            else:
+                memory.log_event(
+                    "person_seen",
+                    person_name=status.lower(),
+                    room=room,
+                    details={"source": "pc_webcam", "command": current_command},
+                )
+            print(f"[PCFollowTest] Memory event saved: {status} in {room}")
         last_status = status
 
         if current_command != last_command:

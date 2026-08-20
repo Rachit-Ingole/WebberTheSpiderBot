@@ -1,8 +1,114 @@
 #include <Wire.h>
+#include <math.h>
+#include <string.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Arduino_RouterBridge.h>
 #include <Adafruit_VL53L0X.h>
-#include <Adafruit_SSD1306.h>
+
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+#define OLED_ADDRESS 0x3C
+#define OLED_ENABLED 1
+#define SENSORS_ENABLED 1
+
+volatile unsigned long servoWriteCount = 0;
+bool setupComplete = false;
+
+// Direct I2C driver avoids the SSD1306 library's incompatible Zephyr GPIO macros.
+class SimpleOLED {
+ public:
+  uint8_t buffer[OLED_WIDTH * OLED_HEIGHT / 8];
+  uint8_t address;
+
+  bool begin(uint8_t i2cAddress) {
+    address = i2cAddress;
+    const uint8_t commands[] = {
+      0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
+      0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8, 0xDA, 0x12,
+      0x81, 0x8F, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF
+    };
+    Wire.beginTransmission(address);
+    Wire.write(0x00);
+    for (uint8_t command : commands) Wire.write(command);
+    if (Wire.endTransmission() != 0) return false;
+    clearDisplay();
+    display();
+    return true;
+  }
+
+  void clearDisplay() { memset(buffer, 0, sizeof(buffer)); }
+
+  void drawPixel(int x, int y, bool color = true) {
+    if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) return;
+    uint16_t index = x + (y / 8) * OLED_WIDTH;
+    if (color) buffer[index] |= (1 << (y & 7));
+    else buffer[index] &= ~(1 << (y & 7));
+  }
+
+  void drawFastHLine(int x, int y, int width, bool color = true) {
+    for (int i = 0; i < width; i++) drawPixel(x + i, y, color);
+  }
+
+  void drawFastVLine(int x, int y, int height, bool color = true) {
+    for (int i = 0; i < height; i++) drawPixel(x, y + i, color);
+  }
+
+  void fillRect(int x, int y, int width, int height, bool color = true) {
+    for (int yy = y; yy < y + height; yy++) drawFastHLine(x, yy, width, color);
+  }
+
+  void fillRoundRect(int x, int y, int width, int height, int radius, bool color = true) {
+    fillRect(x + radius, y, width - 2 * radius, height, color);
+    fillRect(x, y + radius, width, height - 2 * radius, color);
+    fillCircle(x + radius, y + radius, radius, color);
+    fillCircle(x + width - radius - 1, y + radius, radius, color);
+    fillCircle(x + radius, y + height - radius - 1, radius, color);
+    fillCircle(x + width - radius - 1, y + height - radius - 1, radius, color);
+  }
+
+  void fillCircle(int cx, int cy, int radius, bool color = true) {
+    for (int y = -radius; y <= radius; y++) {
+      int half = (int)sqrt(radius * radius - y * y);
+      drawFastHLine(cx - half, cy + y, half * 2 + 1, color);
+    }
+  }
+
+  void drawLine(int x0, int y0, int x1, int y1, bool color = true) {
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int error = dx + dy;
+    while (true) {
+      drawPixel(x0, y0, color);
+      if (x0 == x1 && y0 == y1) break;
+      int e2 = 2 * error;
+      if (e2 >= dy) { error += dy; x0 += sx; }
+      if (e2 <= dx) { error += dx; y0 += sy; }
+    }
+  }
+
+  void drawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, bool color = true) {
+    drawLine(x0, y0, x1, y1, color);
+    drawLine(x1, y1, x2, y2, color);
+    drawLine(x2, y2, x0, y0, color);
+  }
+
+  void display() {
+    for (uint8_t page = 0; page < 8; page++) {
+      Wire.beginTransmission(address);
+      Wire.write(0x00);
+      Wire.write(0xB0 | page);
+      Wire.write(0x00);
+      Wire.write(0x10);
+      Wire.endTransmission();
+      for (uint8_t offset = 0; offset < OLED_WIDTH; offset += 16) {
+        Wire.beginTransmission(address);
+        Wire.write(0x40);
+        for (uint8_t i = 0; i < 16; i++) Wire.write(buffer[page * OLED_WIDTH + offset + i]);
+        Wire.endTransmission();
+      }
+    }
+  }
+};
 
 // Initialize Adafruit PWM Servo Driver at default address 0x40
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
@@ -11,11 +117,10 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 
 // 128x64 I2C OLED. SCK on the module is the I2C clock/SCL line.
-#define OLED_WIDTH 128
-#define OLED_HEIGHT 64
-#define OLED_RESET -1
-#define OLED_ADDRESS 0x3C
-Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
+SimpleOLED oled;
+
+#define SSD1306_WHITE true
+#define SSD1306_BLACK false
 
 enum FaceState {
   FACE_IDLE = 0,
@@ -79,6 +184,7 @@ int setAllServos(int fl_f, int fl_j, int fl_h,
                  int fr_f, int fr_j, int fr_h, 
                  int rl_f, int rl_j, int rl_h, 
                  int rr_f, int rr_j, int rr_h) {
+  servoWriteCount++;
   pwm.writeMicroseconds(9,  constrain(fl_f, 600, 2400));
   pwm.writeMicroseconds(10, constrain(fl_j, 600, 2400));
   pwm.writeMicroseconds(11, constrain(fl_h, 600, 2400));
@@ -98,6 +204,13 @@ int setAllServos(int fl_f, int fl_j, int fl_h,
   return 0;
 }
 
+String getDiagnostics() {
+  return String("setup=") + (setupComplete ? "complete" : "incomplete") +
+         ",servo_writes=" + String(servoWriteCount) +
+         ",oled=" + String(OLED_ENABLED ? "enabled" : "disabled") +
+         ",sensors=" + String(SENSORS_ENABLED ? "enabled" : "disabled");
+}
+
 // Initialize the MPU6050 Accelerometer/Gyroscope
 void initMPU() {
   Wire.beginTransmission(MPU_ADDR);
@@ -109,6 +222,7 @@ void initMPU() {
 // Reads distance from VL53L0X and raw 6-axis data from MPU6050
 // Returns a comma-separated String containing [distance, ax, ay, az, gx, gy, gz]
 String readSensors() {
+  if (!SENSORS_ENABLED) return "-1,0,0,0,0,0,0";
   int distanceMm = -1;
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);
@@ -232,34 +346,42 @@ void setup() {
   Bridge.provide("setAllServos", setAllServos);
   Bridge.provide("readSensors", readSensors);
   Bridge.provide("setDisplayState", setDisplayState);
+  Bridge.provide("getDiagnostics", getDiagnostics);
 
   // Initialize I2C Bus and MPU6050
   Wire.begin();
 
-  bool oledReady = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS);
-  if (!oledReady) {
-    // Some modules use 0x3D instead of the usual 0x3C.
-    oledReady = oled.begin(SSD1306_SWITCHCAPVCC, 0x3D);
-  }
-  if (oledReady) {
-    oled.clearDisplay();
-    oled.display();
-    drawCuteFace(FACE_IDLE, false);
-  }
-  initMPU();
-
-  // Initialize VL53L0X
-  lox.begin();
-
+  // Bring up the servo driver and standing pose first. This keeps locomotion
+  // available even if an optional OLED or distance sensor is disconnected.
   pwm.begin();
   pwm.setOscillatorFrequency(27000000);
   pwm.setPWMFreq(SERVO_FREQ);
   delay(500);
-
   setStandingPose();
+
+  if (OLED_ENABLED) {
+    bool oledReady = oled.begin(OLED_ADDRESS);
+    if (!oledReady) {
+      // Some modules use 0x3D instead of the usual 0x3C.
+      oledReady = oled.begin(0x3D);
+    }
+    if (oledReady) {
+      oled.clearDisplay();
+      oled.display();
+      drawCuteFace(FACE_IDLE, false);
+    }
+  }
+  if (SENSORS_ENABLED) {
+    initMPU();
+    // Initialize VL53L0X
+    lox.begin();
+  }
+
+  setupComplete = true;
+
 }
 
 void loop() {
-  updateCuteFace();
+  if (OLED_ENABLED) updateCuteFace();
   delay(10);
 }
