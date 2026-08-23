@@ -28,12 +28,12 @@ class SpiderBot:
         }
 
         self.stand_hip_offset = 0
-        self.stand_joint_offset = -350
-        self.stand_foot_offset = 350
+        self.stand_joint_offset = -220  # Squat stance reduces lever torque on servos
+        self.stand_foot_offset = 220
 
         self.body_height = 0.0
-        self.step_height = 170.0
-        self.stride_amp = 800.0
+        self.step_height = 90.0         # Lower step lift keeps 4 legs closer to ground
+        self.stride_amp = 450.0         # Shorter strides prevent joint strain
         self.cycle_time = 2.0
 
         self.yaw_trim = 0.82

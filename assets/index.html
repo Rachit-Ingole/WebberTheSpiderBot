@@ -680,6 +680,7 @@
                     <button class="btn-sm" onclick="setDisplayFace('alert')">Alert</button>
                     <button class="btn-sm" onclick="setDisplayFace('left')">Look left</button>
                     <button class="btn-sm" onclick="setDisplayFace('right')">Look right</button>
+                    <button class="btn-sm" onclick="setDisplayFace('sleep')">Sleep</button>
                 </div>
                 <div class="room-current">OLED: <strong id="displayFace">neutral</strong></div>
             </div>
@@ -717,18 +718,18 @@
                 <div class="slider-control">
                     <div class="slider-info">
                         <label for="stepSlider">Step Clearance</label>
-                        <span><span id="stepValue">170</span> µs</span>
+                        <span><span id="stepValue">90</span> µs</span>
                     </div>
-                    <input type="range" id="stepSlider" min="50" max="450" step="10" value="170"
+                    <input type="range" id="stepSlider" min="50" max="450" step="10" value="90"
                         oninput="adjustParams()">
                 </div>
 
                 <div class="slider-control">
                     <div class="slider-info">
                         <label for="strideSlider">Stride Length (Hip Sweep)</label>
-                        <span><span id="strideValue">800</span> µs</span>
+                        <span><span id="strideValue">450</span> µs</span>
                     </div>
-                    <input type="range" id="strideSlider" min="300" max="1200" step="50" value="800"
+                    <input type="range" id="strideSlider" min="300" max="1200" step="50" value="450"
                         oninput="adjustParams()">
                 </div>
 
@@ -758,16 +759,11 @@
             </div>
 
             <div class="dashboard-column">
-            <div class="room-card">
-                <label for="roomSelect">Manual room context</label>
-                <div class="room-row">
-                    <select id="roomSelect">
-                        <option value="unknown">Unknown</option>
-                    </select>
-                    <button onclick="setRoom()">Set room</button>
+            <div class="room-card" style="background: #f8fafc;">
+                <label>Visual Detection Logs</label>
+                <div class="chat-log" id="detectionLog" style="height: 120px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font-family: monospace; overflow-y: auto;">
+                    <div style="color: #94a3b8; font-style: italic;">No detections logged yet...</div>
                 </div>
-                <div class="room-current">Current: <strong id="currentRoom">unknown</strong></div>
-                <div class="room-map-hint">Draw room boundaries on the occupancy map below. You can add multiple boxes.</div>
             </div>
 
             <div class="follower-group" id="followerGroup" style="display:none">
@@ -799,6 +795,12 @@
                         <span class="telemetry-label">ToF Distance</span>
                         <div class="telemetry-value">
                             <span id="telDistance">--</span><span class="telemetry-unit">mm</span>
+                        </div>
+                    </div>
+                    <div class="telemetry-item">
+                        <span class="telemetry-label">GY-87 Temp</span>
+                        <div class="telemetry-value">
+                            <span id="telTemp">--</span><span class="telemetry-unit">°C</span>
                         </div>
                     </div>
                     <div class="telemetry-item">
@@ -865,10 +867,8 @@
                 toggleLabel.innerText = 'Toggled Stand';
             }
 
-            if (status.current_room) {
-                document.getElementById('currentRoom').innerText = status.current_room;
-                document.getElementById('roomSelect').value = status.current_room;
-            }
+            // Check and append logs to the visual detection log window
+            checkDetectionLogs(status);
 
             if (!isDragging) {
                 if (status.body_height !== undefined) {
@@ -912,6 +912,10 @@
             if (status.sensor_distance !== undefined) {
                 document.getElementById('telDistance').innerText =
                     status.sensor_distance >= 0 ? status.sensor_distance : 'N/A';
+            }
+            if (status.sensor_temp !== undefined) {
+                document.getElementById('telTemp').innerText =
+                    status.sensor_temp !== undefined ? status.sensor_temp : '--';
             }
             if (status.sensor_ax !== undefined) {
                 document.getElementById('telAx').innerText = status.sensor_ax;
@@ -985,6 +989,61 @@
             }
         }
 
+        let lastDetectedPerson = "";
+        let lastDetectedEquipment = "";
+
+        function checkDetectionLogs(status) {
+            const logEl = document.getElementById('detectionLog');
+            if (!logEl) return;
+            const nowStr = new Date().toLocaleTimeString();
+            
+            // 1. Check person detection
+            if (status.follower_identity === "KNOWN" && status.follower_identity_name) {
+                const person = status.follower_identity_name;
+                if (person !== lastDetectedPerson) {
+                    appendDetectionLog(`[${nowStr}] Recognized: ${person}`);
+                    lastDetectedPerson = person;
+                }
+            } else if (status.follower_identity === "UNKNOWN") {
+                if ("unknown_intruder" !== lastDetectedPerson) {
+                    appendDetectionLog(`[${nowStr}] Unknown Person detected`);
+                    lastDetectedPerson = "unknown_intruder";
+                }
+            } else if (status.follower_identity === "NO_PERSON" || !status.follower_face_visible) {
+                lastDetectedPerson = "";
+            }
+
+            // 2. Check equipment detection
+            if (status.equipment_name && status.equipment_name !== "NONE") {
+                const equip = status.equipment_name;
+                if (equip !== lastDetectedEquipment) {
+                    appendDetectionLog(`[${nowStr}] Found Equipment: ${equip}`);
+                    lastDetectedEquipment = equip;
+                }
+            } else {
+                lastDetectedEquipment = "";
+            }
+        }
+
+        function appendDetectionLog(text) {
+            const logEl = document.getElementById('detectionLog');
+            if (!logEl) return;
+            if (logEl.querySelector('div[style*="italic"]')) {
+                logEl.innerHTML = "";
+            }
+            const item = document.createElement('div');
+            item.style.marginBottom = "4px";
+            item.style.fontSize = "11px";
+            item.style.color = "#047857"; // Dark emerald text for white background
+            item.innerText = text;
+            logEl.appendChild(item);
+            logEl.scrollTop = logEl.scrollHeight;
+            
+            while (logEl.childNodes.length > 20) {
+                logEl.removeChild(logEl.firstChild);
+            }
+        }
+
         socket.on('status_update', (data) => {
             updateUI(data);
         });
@@ -1001,9 +1060,7 @@
         }
 
         function setRoom() {
-            const room = document.getElementById('roomSelect').value;
-            socket.emit('set_room', { room: room });
-            document.getElementById('currentRoom').innerText = room;
+            // Deprecated
         }
 
         function setDisplayFace(face) {
@@ -1035,7 +1092,21 @@
         }
 
         socket.on('chat_response', (data) => {
-            appendChatMessage('bot', data && data.answer ? data.answer : 'No response received.');
+            const answer = data && data.answer ? data.answer : 'No response received.';
+            appendChatMessage('bot', answer);
+
+            // Web Speech API synthesis for browser-side TTS
+            if ('speechSynthesis' in window) {
+                try {
+                    window.speechSynthesis.cancel(); // Stop any active speech
+                    const utterance = new SpeechSynthesisUtterance(answer);
+                    utterance.rate = 1.05; // Standard talking speed
+                    utterance.pitch = 1.15; // Slightly cute, high-pitched robot tone
+                    window.speechSynthesis.speak(utterance);
+                } catch (e) {
+                    console.error("Speech synthesis failed:", e);
+                }
+            }
         });
 
         function toggleAutonomy() { socket.emit('toggle_autonomy', {}); }
@@ -1064,23 +1135,11 @@
         });
 
         socket.on('room_update', (data) => {
-            if (data && data.room) {
-                document.getElementById('currentRoom').innerText = data.room;
-                document.getElementById('roomSelect').value = data.room;
-            }
+            // Room update received
         });
 
         function populateRoomChoices() {
-            const select = document.getElementById('roomSelect');
-            const current = select.value;
-            select.innerHTML = '<option value="unknown">Unknown</option>';
-            roomRegions.forEach(room => {
-                const option = document.createElement('option');
-                option.value = room.name;
-                option.textContent = room.name;
-                select.appendChild(option);
-            });
-            select.value = [...select.options].some(o => o.value === current) ? current : 'unknown';
+            // Room options populated in memory
         }
 
         function toggleWalk(checkbox) {

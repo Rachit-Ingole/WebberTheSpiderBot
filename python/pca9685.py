@@ -1,5 +1,6 @@
 from arduino.app_utils import Bridge
 import time
+from bridge_lock import bridge_lock
 
 _last_debug_log = 0.0
 
@@ -33,25 +34,18 @@ class PCA9685:
         """Sends all 12 buffered servo positions to the MCU in a single RPC call."""
         global _last_debug_log
         try:
-            result = Bridge.call("setAllServos",
-                self.pulses[9],   # FL Foot (ch 9)
-                self.pulses[10],  # FL Joint (ch 10)
-                self.pulses[11],  # FL Hip (ch 11)
-                self.pulses[13],  # FR Foot (ch 13)
-                self.pulses[15],  # FR Joint (ch 15)
-                self.pulses[14],  # FR Hip (ch 14)
-                self.pulses[1],   # RL Foot (ch 1)
-                self.pulses[2],   # RL Joint (ch 2)
-                self.pulses[3],   # RL Hip (ch 3)
-                self.pulses[5],   # RR Foot (ch 5)
-                self.pulses[6],   # RR Joint (ch 6)
-                self.pulses[12]   # RR Hip (ch 12)
-            )
+            with bridge_lock:
+                result = Bridge.call("setAllServos",
+                    self.pulses[9], self.pulses[10], self.pulses[11],
+                    self.pulses[13], self.pulses[15], self.pulses[14],
+                    self.pulses[1], self.pulses[2], self.pulses[3],
+                    self.pulses[5], self.pulses[6], self.pulses[12])
             now = time.monotonic()
             if now - _last_debug_log >= 2.0:
                 _last_debug_log = now
                 try:
-                    diagnostics = Bridge.call("getDiagnostics")
+                    with bridge_lock:
+                        diagnostics = Bridge.call("getDiagnostics")
                 except Exception as diagnostic_error:
                     diagnostics = f"diagnostics failed: {diagnostic_error}"
                 print(f"[PCA9685] setAllServos OK result={result}; {diagnostics}", flush=True)

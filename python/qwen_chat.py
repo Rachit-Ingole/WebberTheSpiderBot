@@ -12,7 +12,7 @@ class QwenChat:
     def __init__(self, memory=None):
         load_project_env()
         self.url = os.getenv("SPIDEY_LLM_URL", "http://127.0.0.1:11434/api/chat")
-        self.model = os.getenv("SPIDEY_LLM_MODEL", "qwen3:0.6b")
+        self.model = os.getenv("SPIDEY_LLM_MODEL", "qwen2.5:0.5b")
         self.memory = memory or MemoryStore()
 
     def _memory_context(self):
@@ -28,13 +28,20 @@ class QwenChat:
             )
         return "\n".join(lines)
 
+    def _strip_thinking(self, text):
+        import re
+        # Remove everything between <think> and </think> (case-insensitive, multi-line)
+        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.IGNORECASE | re.DOTALL)
+        return cleaned.strip()
+
     def ask(self, question):
         question = str(question or "").strip()
         if not question:
             return "Please ask me something about Spidey."
         prompt = (
             "You are Spidey, a small home robot. Answer briefly and honestly. "
-            "Do not show or perform extended reasoning; give a direct answer in 1-3 sentences. "
+            "CRITICAL: Do NOT output any thinking, reasoning process, or `<think>` tags. "
+            "Provide ONLY the final direct answer in 1-3 sentences immediately. "
             "Use only the event memory below for claims about people, rooms, and times. "
             "If the memory does not contain the answer, say that clearly.\n\n"
             f"EVENT MEMORY:\n{self._memory_context()}\n\n"
@@ -44,7 +51,8 @@ class QwenChat:
             "model": self.model,
             "stream": False,
             "think": False,
-            "options": {"temperature": 0.2, "num_predict": 80},
+            "keep_alive": "60m",
+            "options": {"temperature": 0.0, "num_predict": 45, "num_thread": 2},
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
         request = urllib.request.Request(
@@ -54,9 +62,10 @@ class QwenChat:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=180) as response:
                 result = json.loads(response.read().decode("utf-8"))
             answer = result.get("message", {}).get("content", "").strip()
+            answer = self._strip_thinking(answer)
             return answer or "Qwen returned an empty response."
         except urllib.error.URLError:
             return (
@@ -70,6 +79,7 @@ class QwenChat:
         """Turn a natural-language request into a small validated-by-caller plan."""
         prompt = (
             "Convert the user's robot task into JSON only. No markdown. "
+            "CRITICAL: Do NOT output any thinking, reasoning process, or `<think>` tags. "
             "Allowed actions are: set_room(name), set_face(face), "
             "move(direction,duration), scan_room(duration), run_circles(count). "
             "Directions: forward, backward, left, right. Faces: idle, happy, alert, left, right. "
@@ -83,16 +93,18 @@ class QwenChat:
             "stream": False,
             "think": False,
             "format": "json",
-            "options": {"temperature": 0.0, "num_predict": 180},
+            "keep_alive": "60m",
+            "options": {"temperature": 0.0, "num_predict": 120, "num_thread": 2},
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
         request_obj = urllib.request.Request(
             self.url, data=payload,
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(request_obj, timeout=60) as response:
+            with urllib.request.urlopen(request_obj, timeout=180) as response:
                 result = json.loads(response.read().decode("utf-8"))
             content = result.get("message", {}).get("content", "{}")
+            content = self._strip_thinking(content)
             return json.loads(content)
         except Exception as exc:
             return {"actions": [], "message": f"I could not create a safe task plan: {exc}"}

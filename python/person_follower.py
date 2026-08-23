@@ -41,6 +41,7 @@ from typing import Callable
 
 from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 from person_identity import PersonIdentity
+from telegram_notifier import TelegramNotifier
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
 # Horizontal zone boundaries (0 = left edge, 1 = right edge of frame)
@@ -82,6 +83,7 @@ class PersonFollower:
         self._preview_callback = preview_callback
 
         self._active = False
+        self._llm_busy = False
         self._lock   = threading.Lock()
 
         # Telemetry exposed to the UI
@@ -95,6 +97,7 @@ class PersonFollower:
 
         self._last_detect_time: float = 0.0
         self._identity = PersonIdentity(face_lost_timeout=8.0, confirm_frames=3)
+        self._telegram = TelegramNotifier()
 
         # Initialise the camera brick
         # camera_preview supplies the raw frame needed by the optional face
@@ -129,6 +132,11 @@ class PersonFollower:
             self._last_detect_time = 0.0
             print("[PersonFollower] Enabled — scanning for person.")
 
+    def set_llm_busy(self, busy: bool):
+        """Pause heavy vision processing during LLM generation to free 100% CPU."""
+        with self._lock:
+            self._llm_busy = busy
+
     @property
     def is_active(self) -> bool:
         with self._lock:
@@ -138,7 +146,7 @@ class PersonFollower:
     def latest(self) -> tuple:
         """Return (cmd_str, telemetry_dict) for inclusion in the status broadcast."""
         with self._lock:
-            return self._latest_cmd, dict(self._latest_info)
+            return self._latest_cmd, {**self._latest_info, **self._identity.telemetry()}
 
     def shutdown(self):
         """Stop the camera brick cleanly."""
@@ -153,13 +161,9 @@ class PersonFollower:
         Args:
             detections: {label: [{"confidence": float, "bounding_box_xyxy": tuple}]}
         """
-        if self._preview_callback is not None and frame is not None:
-            self._preview_callback(frame)
-
-        with self._lock:
-            if not self._active:
-                return
-
+        if self._llm_busy:
+            self._draw_and_send_preview(detections, frame)
+            return
         person_boxes = []
         for label in DETECTION_LABELS:
             person_boxes = detections.get(label, [])
@@ -167,18 +171,31 @@ class PersonFollower:
                 break
         if not person_boxes:
             # Something was detected but not a person — treat as no-person
+            info = {
+                "zone": self._identity.state,
+                "confidence": 0.0,
+                "cx": 0.5,
+                "dist_mm": self._get_dist(),
+            }
             if (self._last_detect_time
                     and time.time() - self._last_detect_time
                     <= self._identity.face_lost_timeout):
                 self._identity.observe(track_present=True, face_visible=False)
-                self._issue_command("stop", {
-                    "zone": self._identity.state,
-                    "confidence": 0.0,
-                    "cx": 0.5,
-                    "dist_mm": self._get_dist(),
-                })
+                with self._lock:
+                    if self._active:
+                        self._issue_command("stop", info)
+                    else:
+                        self._latest_info = info
             else:
                 self._identity.observe(track_present=False)
+                with self._lock:
+                    self._latest_info = info
+            
+            self._draw_and_send_preview(detections, frame)
+            
+            with self._lock:
+                if not self._active:
+                    return
             self._handle_no_person()
             return
 
@@ -213,13 +230,118 @@ class PersonFollower:
             matched_name=matched_name,
             match_confidence=match_confidence,
         )
+        self._draw_and_send_preview(detections, frame, matched_name)
+        
+        with self._lock:
+            if not self._active:
+                # Update telemetry for WebUI even when follow mode is off
+                self._latest_info = {
+                    "zone": self._identity.state,
+                    "confidence": round(conf, 2),
+                    "cx": round(cx, 3),
+                    "dist_mm": self._get_dist(),
+                }
+                return
+                
         self._decide_and_drive(cx, conf)
+
+    def _draw_and_send_preview(self, detections: dict, frame=None, matched_name=None):
+        if self._preview_callback is None or frame is None:
+            return
+
+        # 1. Pass clean raw frame to preview callback for ORB equipment recognition
+        try:
+            self._preview_callback(frame)
+        except Exception:
+            pass
+
+        import cv2
+        import numpy as np
+
+        # 2. Decode JPEG bytes into a numpy image array for visual UI overlays
+        if isinstance(frame, (bytes, bytearray, memoryview)):
+            draw_frame = cv2.imdecode(np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR)
+        else:
+            draw_frame = frame.copy() if hasattr(frame, 'copy') else frame
+
+        if draw_frame is None:
+            return
+
+        h, w = draw_frame.shape[:2]
+        has_intruder = False
+        intruder_conf = 0.0
+
+        # Draw bounding boxes for all detected items
+        for label, boxes in detections.items():
+            for box in boxes:
+                x1, y1, x2, y2 = box["bounding_box_xyxy"]
+                conf = box["confidence"]
+
+                # Convert normalized coords (0.0-1.0) to pixel coordinates
+                if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+                    frac_w = abs(x2 - x1)
+                    frac_h = abs(y2 - y1)
+                    px1, py1 = int(x1 * w), int(y1 * h)
+                    px2, py2 = int(x2 * w), int(y2 * h)
+                else:
+                    frac_w = abs(x2 - x1) / w
+                    frac_h = abs(y2 - y1) / h
+                    px1, py1 = int(x1), int(y1)
+                    px2, py2 = int(x2), int(y2)
+
+                # 1. Ignore full-screen false positive boxes
+                if frac_w > 0.85 and frac_h > 0.85:
+                    continue
+
+                display_label = label
+                color = (34, 197, 94) # Emerald Green (BGR: 94, 197, 34) for generic objects
+
+                if label in ("face", "person"):
+                    if matched_name:
+                        display_label = matched_name
+                        color = (239, 68, 68) # Bright Blue (BGR: 68, 68, 239) for recognized person
+                    elif label == "face":
+                        if conf < 0.60:
+                            continue
+                        display_label = "INTRUDER"
+                        color = (0, 0, 255) # Warning Red (BGR: 0, 0, 255) for intruder
+                        has_intruder = True
+                        intruder_conf = conf
+
+                # Draw bounding box rectangle (thicker lines: thickness=3)
+                cv2.rectangle(draw_frame, (px1, py1), (px2, py2), color, 3)
+
+                # Label text background banner
+                text = f"{display_label} {int(conf * 100)}%"
+                (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(draw_frame, (px1, py1 - th - 8), (px1 + tw + 4, py1), color, -1)
+
+                # Overlay label text
+                cv2.putText(draw_frame, text, (px1 + 2, py1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # 2. Re-encode the image array back to JPEG bytes
+        success, encoded_jpeg = cv2.imencode('.jpg', draw_frame)
+        if success:
+            jpeg_bytes = encoded_jpeg.tobytes()
+            import base64
+            from web_ui import ui
+            jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            ui.send_message("camera_preview", {"jpeg": jpeg_b64})
+            
+            # Send Telegram intruder alert with the drawn red bounding box image
+            if has_intruder and self._telegram.enabled:
+                self._telegram.send_intruder_alert(
+                    confidence=intruder_conf,
+                    location="Uno Q Camera",
+                    image=jpeg_bytes,
+                )
+        else:
+            self._preview_callback(frame)
 
     # ── No-detection handler ──────────────────────────────────────────────────
 
     def _handle_no_person(self):
         """Issue a scan/search command when no person has been seen for a while."""
-        info = {**info, **self._identity.telemetry()}
         with self._lock:
             if not self._active:
                 return

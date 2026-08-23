@@ -4,6 +4,8 @@
 #include <Adafruit_PWMServoDriver.h>
 #include <Arduino_RouterBridge.h>
 #include <Adafruit_VL53L0X.h>
+#include <zephyr/kernel.h>
+#include "font5x7.h"
 
 #define OLED_WIDTH 128
 #define OLED_HEIGHT 64
@@ -11,8 +13,11 @@
 #define OLED_ENABLED 1
 #define SENSORS_ENABLED 1
 
+void drawChar(int x, int y, char c, bool color = true);
+
 volatile unsigned long servoWriteCount = 0;
 bool setupComplete = false;
+K_MUTEX_DEFINE(i2cMutex);
 
 // Direct I2C driver avoids the SSD1306 library's incompatible Zephyr GPIO macros.
 class SimpleOLED {
@@ -93,6 +98,7 @@ class SimpleOLED {
   }
 
   void display() {
+    k_mutex_lock(&i2cMutex, K_FOREVER);
     for (uint8_t page = 0; page < 8; page++) {
       Wire.beginTransmission(address);
       Wire.write(0x00);
@@ -107,6 +113,7 @@ class SimpleOLED {
         Wire.endTransmission();
       }
     }
+    k_mutex_unlock(&i2cMutex);
   }
 };
 
@@ -127,14 +134,19 @@ enum FaceState {
   FACE_HAPPY = 1,
   FACE_ALERT = 2,
   FACE_LEFT = 3,
-  FACE_RIGHT = 4
+  FACE_RIGHT = 4,
+  FACE_TEXT = 5,
+  FACE_SLEEP = 6
 };
 
 volatile int requestedFaceState = FACE_IDLE;
 int displayedFaceState = -1;
-unsigned long lastFaceFrame = 0;
+bool displayedFaceBlinking = false;
 unsigned long lastBlink = 0;
 bool faceBlinking = false;
+unsigned long lastFaceFrame = 0;
+String scrollText = "";
+int scrollX = OLED_WIDTH;
 
 #define SERVO_FREQ 50
 #define MPU_ADDR 0x68
@@ -184,6 +196,7 @@ int setAllServos(int fl_f, int fl_j, int fl_h,
                  int fr_f, int fr_j, int fr_h, 
                  int rl_f, int rl_j, int rl_h, 
                  int rr_f, int rr_j, int rr_h) {
+  k_mutex_lock(&i2cMutex, K_FOREVER);
   servoWriteCount++;
   pwm.writeMicroseconds(9,  constrain(fl_f, 600, 2400));
   pwm.writeMicroseconds(10, constrain(fl_j, 600, 2400));
@@ -201,12 +214,18 @@ int setAllServos(int fl_f, int fl_j, int fl_h,
   pwm.writeMicroseconds(6,  constrain(rr_j, 600, 2400));
   pwm.writeMicroseconds(12, constrain(rr_h, 600, 2400));
 
+  k_mutex_unlock(&i2cMutex);
   return 0;
 }
 
 String getDiagnostics() {
+  k_mutex_lock(&i2cMutex, K_FOREVER);
+  Wire.beginTransmission(0x40);
+  bool pcaAck = (Wire.endTransmission() == 0);
+  k_mutex_unlock(&i2cMutex);
   return String("setup=") + (setupComplete ? "complete" : "incomplete") +
          ",servo_writes=" + String(servoWriteCount) +
+         ",pca=" + String(pcaAck ? "ack" : "missing") +
          ",oled=" + String(OLED_ENABLED ? "enabled" : "disabled") +
          ",sensors=" + String(SENSORS_ENABLED ? "enabled" : "disabled");
 }
@@ -223,6 +242,7 @@ void initMPU() {
 // Returns a comma-separated String containing [distance, ax, ay, az, gx, gy, gz]
 String readSensors() {
   if (!SENSORS_ENABLED) return "-1,0,0,0,0,0,0";
+  k_mutex_lock(&i2cMutex, K_FOREVER);
   int distanceMm = -1;
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);
@@ -239,20 +259,22 @@ String readSensors() {
   int16_t ax = Wire.read() << 8 | Wire.read();
   int16_t ay = Wire.read() << 8 | Wire.read();
   int16_t az = Wire.read() << 8 | Wire.read();
-  Wire.read() << 8 | Wire.read(); // Skip temp register (2 bytes)
+  int16_t raw_temp = Wire.read() << 8 | Wire.read(); // Read MPU6050 temperature
   int16_t gx = Wire.read() << 8 | Wire.read();
   int16_t gy = Wire.read() << 8 | Wire.read();
   int16_t gz = Wire.read() << 8 | Wire.read();
 
-  // Package as a string: "dist,ax,ay,az,gx,gy,gz"
-  return String(distanceMm) + "," +
+  // Package as a string: "dist,ax,ay,az,gx,gy,gz,raw_temp"
+  String result = String(distanceMm) + "," +
          String(ax) + "," + String(ay) + "," + String(az) + "," +
-         String(gx) + "," + String(gy) + "," + String(gz);
+         String(gx) + "," + String(gy) + "," + String(gz) + "," + String(raw_temp);
+  k_mutex_unlock(&i2cMutex);
+  return result;
 }
 
 // Called through Bridge; only update state here. OLED drawing stays in loop().
 int setDisplayState(int state) {
-  if (state < FACE_IDLE || state > FACE_RIGHT) return -1;
+  if (state < FACE_IDLE || state > FACE_SLEEP) return -1;
   requestedFaceState = state;
   return 0;
 }
@@ -260,40 +282,50 @@ int setDisplayState(int state) {
 void drawCuteFace(int state, bool blinking) {
   oled.clearDisplay();
 
-  const int leftEyeX = 38;
-  const int rightEyeX = 90;
-  const int eyeY = 27;
-  const int eyeW = 24;
-  const int eyeH = 20;
+  const int leftEyeX = 32;
+  const int rightEyeX = 96;
+  const int eyeY = 32; // Centered vertically on 64px display
 
-  // Friendly rounded eyes rather than a circular smiley face.
-  if (blinking) {
-    oled.drawFastHLine(leftEyeX - 10, eyeY, 20, SSD1306_WHITE);
-    oled.drawFastHLine(rightEyeX - 10, eyeY, 20, SSD1306_WHITE);
-  } else {
-    oled.fillRoundRect(leftEyeX - eyeW / 2, eyeY - eyeH / 2,
-                       eyeW, eyeH, 7, SSD1306_WHITE);
-    oled.fillRoundRect(rightEyeX - eyeW / 2, eyeY - eyeH / 2,
-                       eyeW, eyeH, 7, SSD1306_WHITE);
+  if (state == FACE_HAPPY) {
+    // Happy eyes: Cute upward-curving arches / domes!
+    oled.fillCircle(leftEyeX, eyeY + 8, 22, SSD1306_WHITE);
+    oled.fillRect(leftEyeX - 22, eyeY + 8, 44, 22, SSD1306_BLACK);
+    oled.fillCircle(rightEyeX, eyeY + 8, 22, SSD1306_WHITE);
+    oled.fillRect(rightEyeX - 22, eyeY + 8, 44, 22, SSD1306_BLACK);
+  } 
+  else if (state == FACE_SLEEP) {
+    // Sleepy eyes: Thick horizontal closed bars near the bottom.
+    oled.fillRoundRect(leftEyeX - 20, eyeY + 6, 40, 10, 5, SSD1306_WHITE);
+    oled.fillRoundRect(rightEyeX - 20, eyeY + 6, 40, 10, 5, SSD1306_WHITE);
+  }
+  else if (blinking) {
+    // Blinking: Thin closed slits.
+    oled.fillRoundRect(leftEyeX - 20, eyeY + 6, 40, 4, 1, SSD1306_WHITE);
+    oled.fillRoundRect(rightEyeX - 20, eyeY + 6, 40, 4, 1, SSD1306_WHITE);
+  } 
+  else if (state == FACE_ALERT) {
+    // Alert/Surprised: Big round white circles with tiny black pupils in the middle!
+    oled.fillCircle(leftEyeX, eyeY, 26, SSD1306_WHITE);
+    oled.fillCircle(leftEyeX, eyeY, 6, SSD1306_BLACK);
+    oled.fillCircle(rightEyeX, eyeY, 26, SSD1306_WHITE);
+    oled.fillCircle(rightEyeX, eyeY, 6, SSD1306_BLACK);
+  } 
+  else {
+    // FACE_IDLE, FACE_LEFT, FACE_RIGHT:
+    // Big rounded rectangles for the eyes, with moving pupils.
+    const int eyeW = 42;
+    const int eyeH = 38;
+    const int eyeRadius = 13;
+    
+    oled.fillRoundRect(leftEyeX - eyeW / 2, eyeY - eyeH / 2, eyeW, eyeH, eyeRadius, SSD1306_WHITE);
+    oled.fillRoundRect(rightEyeX - eyeW / 2, eyeY - eyeH / 2, eyeW, eyeH, eyeRadius, SSD1306_WHITE);
 
     int pupilOffset = 0;
-    if (state == FACE_LEFT) pupilOffset = -5;
-    if (state == FACE_RIGHT) pupilOffset = 5;
-    oled.fillCircle(leftEyeX + pupilOffset, eyeY, 5, SSD1306_BLACK);
-    oled.fillCircle(rightEyeX + pupilOffset, eyeY, 5, SSD1306_BLACK);
-  }
-
-  if (state == FACE_ALERT) {
-    oled.drawTriangle(64, 43, 57, 55, 71, 55, SSD1306_WHITE);
-    oled.drawFastVLine(64, 47, 5, SSD1306_BLACK);
-    oled.drawPixel(64, 54, SSD1306_BLACK);
-  } else if (state == FACE_HAPPY) {
-    oled.drawLine(54, 47, 59, 51, SSD1306_WHITE);
-    oled.drawLine(59, 51, 64, 53, SSD1306_WHITE);
-    oled.drawLine(64, 53, 69, 51, SSD1306_WHITE);
-    oled.drawLine(69, 51, 74, 47, SSD1306_WHITE);
-  } else {
-    oled.drawFastHLine(57, 50, 14, SSD1306_WHITE);
+    if (state == FACE_LEFT) pupilOffset = -8;
+    if (state == FACE_RIGHT) pupilOffset = 8;
+    
+    oled.fillCircle(leftEyeX + pupilOffset, eyeY, 10, SSD1306_BLACK);
+    oled.fillCircle(rightEyeX + pupilOffset, eyeY, 10, SSD1306_BLACK);
   }
 
   oled.display();
@@ -301,6 +333,30 @@ void drawCuteFace(int state, bool blinking) {
 
 void updateCuteFace() {
   unsigned long now = millis();
+
+  if (requestedFaceState == FACE_TEXT) {
+    if (now - lastFaceFrame >= 30) { // 30ms scroll speed step
+      lastFaceFrame = now;
+      oled.clearDisplay();
+      int x = scrollX;
+      for (unsigned int i = 0; i < scrollText.length(); i++) {
+        char c = scrollText[i];
+        if (x + 10 >= 0 && x < OLED_WIDTH) { // clipping check
+          drawChar(x, 24, c, true); // Centered vertically (font height is 14px, centered in 64px is (64-14)/2 = 25, let's use 24)
+        }
+        x += 12; // 10px width + 2px spacing
+      }
+      oled.display();
+      scrollX -= 3; // Scroll slightly faster since font is bigger
+      
+      int textWidth = scrollText.length() * 12;
+      if (scrollX < -textWidth) {
+        requestedFaceState = FACE_IDLE;
+        displayedFaceState = -1; // Force eye redraw
+      }
+    }
+    return;
+  }
 
   // Blink briefly every few seconds.
   if (now - lastBlink >= 3200) {
@@ -312,9 +368,9 @@ void updateCuteFace() {
   }
 
   if (displayedFaceState != requestedFaceState ||
-      faceBlinking || now - lastFaceFrame >= 100) {
+      displayedFaceBlinking != faceBlinking) {
     displayedFaceState = requestedFaceState;
-    lastFaceFrame = now;
+    displayedFaceBlinking = faceBlinking;
     drawCuteFace(displayedFaceState, faceBlinking);
   }
 }
@@ -339,6 +395,25 @@ void setStandingPose() {
     writeJointOffset(i, offset);
   }
 }
+void drawChar(int x, int y, char c, bool color) {
+  if (c < 0x20 || c > 0x7E) return; // Only printable ASCII
+  uint16_t fontIndex = c - 0x20;
+  for (int i = 0; i < 5; i++) {
+    uint8_t line = pgm_read_byte(&(font5x7[fontIndex][i]));
+    for (int j = 0; j < 7; j++) {
+      if (line & (1 << j)) {
+        oled.fillRect(x + i * 2, y + j * 2, 2, 2, color);
+      }
+    }
+  }
+}
+
+int showScrollingText(String text) {
+  scrollText = text;
+  scrollX = OLED_WIDTH;
+  requestedFaceState = FACE_TEXT;
+  return 0;
+}
 
 void setup() {
   // Initialize communication bridge
@@ -347,6 +422,7 @@ void setup() {
   Bridge.provide("readSensors", readSensors);
   Bridge.provide("setDisplayState", setDisplayState);
   Bridge.provide("getDiagnostics", getDiagnostics);
+  Bridge.provide("showScrollingText", showScrollingText);
 
   // Initialize I2C Bus and MPU6050
   Wire.begin();

@@ -106,6 +106,8 @@ class FaceRecognizer:
         height, width = image.shape[:2]
         px1, py1, px2, py2 = self._person_box(person_box, width, height)
         faces = self._detect(image)
+        # Require faces to be at least 32x32 pixels to ignore background noise/artifacts
+        faces = [f for f in faces if float(f[2]) >= 32.0 and float(f[3]) >= 32.0]
         candidates = []
         for face in faces:
             fx, fy, fw, fh = [float(v) for v in face[:4]]

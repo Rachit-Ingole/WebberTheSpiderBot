@@ -12,6 +12,7 @@ from arduino.app_bricks.web_ui import WebUI
 from memory_store import MemoryStore
 from telegram_notifier import TelegramNotifier
 from qwen_chat import QwenChat
+from bridge_lock import bridge_lock
 
 LEFT_END = 0.38
 RIGHT_START = 0.62
@@ -44,7 +45,8 @@ def run_camera_test():
         face = str(data.get("face", "idle")).strip().lower()
         if face not in states:
             return
-        Bridge.call("setDisplayState", states[face])
+        with bridge_lock:
+            Bridge.call("setDisplayState", states[face])
         ui.send_message("display_face_update", {"face": face})
         print(f"[OLED] Face set to {face}", flush=True)
 
@@ -147,6 +149,28 @@ def run_camera_test():
                         details={"source": "uno_q_camera"},
                     )
                 image = frame
+                if frame is not None:
+                    image = frame.copy()
+                    h, w = image.shape[:2]
+                    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+                        px1, py1 = int(x1 * w), int(y1 * h)
+                        px2, py2 = int(x2 * w), int(y2 * h)
+                    else:
+                        px1, py1 = int(x1), int(y1)
+                        px2, py2 = int(x2), int(y2)
+                    
+                    # Red box for intruder (BGR: 0, 0, 255)
+                    color = (0, 0, 255)
+                    cv2.rectangle(image, (px1, py1), (px2, py2), color, 2)
+                    
+                    # Text background banner
+                    text = f"INTRUDER {int(confidence * 100)}%"
+                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                    cv2.rectangle(image, (px1, py1 - th - 6), (px1 + tw + 4, py1), color, -1)
+                    
+                    # Text overlay
+                    cv2.putText(image, text, (px1 + 2, py1 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
                 if not isinstance(image, (bytes, bytearray, memoryview)):
                     encoded, jpeg = cv2.imencode(".jpg", image)
                     image = jpeg.tobytes() if encoded else None

@@ -9,10 +9,11 @@ from person_follower import PersonFollower
 from memory_store import MemoryStore
 from qwen_chat import QwenChat
 from task_executor import TaskExecutor
+from bridge_lock import bridge_lock
 
 # Set CAMERA_ENABLED to True only when the USB camera is connected.
 CAMERA_ONLY = False
-CAMERA_ENABLED = False
+CAMERA_ENABLED = True
 
 if CAMERA_ONLY:
     if CAMERA_ENABLED:
@@ -29,12 +30,17 @@ if CAMERA_ONLY:
             def answer_question():
                 answer = qwen.ask(question)
                 ui.send_message("chat_response", {"question": question, "answer": answer})
+                try:
+                    with bridge_lock:
+                        Bridge.call("showScrollingText", answer)
+                except Exception as e:
+                    print(f"[OLED] Failed to scroll text: {e}", flush=True)
             threading.Thread(target=answer_question, daemon=True).start()
 
         ui.on_message("chat_question", ask_qwen_without_camera)
 
         def set_display_face_without_camera(_sid, data):
-            states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+            states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4, "sleep": 6}
             face = str(data.get("face", "idle")).strip().lower()
             if face not in states:
                 return
@@ -75,6 +81,17 @@ current_room = "unknown"
 memory = MemoryStore()
 qwen = QwenChat(memory)
 autonomy_enabled = False
+llm_busy = False
+
+# ── Voice Assistant Setup ───────────────────────────────────────────────────
+ENABLE_VOICE_ASSISTANT = False
+if ENABLE_VOICE_ASSISTANT:
+    try:
+        from voice_assistant import VoiceAssistant
+        assistant = VoiceAssistant(qwen, memory)
+        assistant.start()
+    except Exception as exc:
+        print(f"[VoiceAssistant] Failed to start service: {exc}", flush=True)
 
 def task_set_room(name):
     global current_room
@@ -82,25 +99,42 @@ def task_set_room(name):
     ui.send_message("room_update", {"room": current_room})
 
 def task_set_face(face):
-    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4, "sleep": 6}
     if face in states:
-        Bridge.call("setDisplayState", states[face])
+        with bridge_lock:
+            Bridge.call("setDisplayState", states[face])
         ui.send_message("display_face_update", {"face": face})
 
 def handle_display_face(sid, data):
-    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4}
+    states = {"idle": 0, "happy": 1, "alert": 2, "left": 3, "right": 4, "sleep": 6}
     face = str(data.get("face", "idle")).strip().lower()
     if face not in states:
         return
-    Bridge.call("setDisplayState", states[face])
+    with bridge_lock:
+        Bridge.call("setDisplayState", states[face])
     ui.send_message("display_face_update", {"face": face})
     print(f"[OLED] Face set to {face}")
 
 def handle_chat_question(sid, data):
+    global llm_busy
     question = str(data.get("question", "")).strip()
     def answer_question():
-        answer = qwen.ask(question)
+        global llm_busy
+        llm_busy = True
+        if follower is not None:
+            follower.set_llm_busy(True)
+        try:
+            answer = qwen.ask(question)
+        finally:
+            llm_busy = False
+            if follower is not None:
+                follower.set_llm_busy(False)
         ui.send_message("chat_response", {"question": question, "answer": answer})
+        try:
+            with bridge_lock:
+                Bridge.call("showScrollingText", answer)
+        except Exception as e:
+            print(f"[OLED] Failed to scroll text: {e}", flush=True)
     threading.Thread(target=answer_question, daemon=True).start()
 
 def handle_toggle_autonomy(sid, data):
@@ -110,11 +144,21 @@ def handle_toggle_autonomy(sid, data):
     ui.send_message("autonomy_update", {"enabled": autonomy_enabled})
 
 def handle_task_request(sid, data):
+    global llm_busy
     request = str(data.get("task", "")).strip()
     if not request:
         return
     def plan_and_run():
-        plan = qwen.plan_task(request)
+        global llm_busy
+        llm_busy = True
+        if follower is not None:
+            follower.set_llm_busy(True)
+        try:
+            plan = qwen.plan_task(request)
+        finally:
+            llm_busy = False
+            if follower is not None:
+                follower.set_llm_busy(False)
         ui.send_message("task_plan", plan)
         if not autonomy_enabled:
             ui.send_message("task_update", {"status": "waiting", "detail": "Enable Autonomous Tasks to run this plan."})
@@ -127,18 +171,85 @@ def handle_cancel_task(sid, data):
 # PersonFollower is instantiated lazily after sensor_distance is defined below
 
 _last_preview_sent = 0.0
-CAMERA_PREVIEW_INTERVAL = 0.25  # 4 FPS keeps the UI responsive and lightweight
+CAMERA_PREVIEW_INTERVAL = 1.0   # 1 FPS reduces CPU vision workload by 75%, matching Spidey's gait stride cycle
 
 def send_camera_preview(frame):
     """Forward throttled JPEG preview frames to the browser UI."""
     global _last_preview_sent
+    global detected_equipment_name, detected_equipment_matches, detected_equipment_time
+    global last_logged_equipment, last_logged_time
+    global llm_busy
     now = time.monotonic()
     if now - _last_preview_sent < CAMERA_PREVIEW_INTERVAL:
         return
     if not isinstance(frame, (bytes, bytearray, memoryview)):
         return
     _last_preview_sent = now
+
+    # When LLM is generating, skip heavy equipment recognition to free 100% CPU
+    if llm_busy:
+        try:
+            jpeg_b64 = base64.b64encode(bytes(frame)).decode("ascii")
+            ui.send_message("camera_preview", {"jpeg": jpeg_b64})
+        except Exception:
+            pass
+        return
+
+    draw_image = None
+    # Run equipment recognition on the throttled preview frames
+    if equip_recognizer is not None:
+        try:
+            name, matches = equip_recognizer.match_frame(frame)
+            if name is not None:
+                detected_equipment_name = name
+                detected_equipment_matches = matches
+                detected_equipment_time = time.time()
+                print(f"[EquipmentDetector] Found: {name} ({matches} matches)", flush=True)
+
+            active_name = name or (detected_equipment_name if time.time() - detected_equipment_time < 3.0 and detected_equipment_name != "NONE" else None)
+            active_matches = matches if name is not None else detected_equipment_matches
+
+            if active_name is not None:
+                # Decode frame to draw on it
+                import numpy as np
+                import cv2
+                draw_image = cv2.imdecode(np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if draw_image is not None:
+                    h, w = draw_image.shape[:2]
+                    # Draw a nice thick orange border around the center 60% target area (BGR: 0, 165, 255)
+                    color = (0, 165, 255)
+                    ry1, rx1 = int(h * 0.2), int(w * 0.2)
+                    ry2, rx2 = int(h * 0.8), int(w * 0.8)
+                    cv2.rectangle(draw_image, (rx1, ry1), (rx2, ry2), color, 3)
+                    
+                    # Label text background banner
+                    text = f"EQUIPMENT: {active_name.upper()} ({active_matches} matches)"
+                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                    cv2.rectangle(draw_image, (rx1, ry1 - th - 8), (rx1 + tw + 4, ry1), color, -1)
+                    cv2.putText(draw_image, text, (rx1 + 2, ry1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                
+                # Log detection to database if it's a new item or 10 seconds have elapsed
+                if name != last_logged_equipment or (time.time() - last_logged_time > 10.0):
+                    memory.log_event(
+                        event_type="equipment_seen",
+                        person_name=name,
+                        room=current_room,
+                        confidence=float(matches),
+                        details={"matches": matches}
+                    )
+                    last_logged_equipment = name
+                    last_logged_time = time.time()
+                    print(f"[EquipmentDetector] Logged equipment_seen to database: {name}", flush=True)
+        except Exception as e:
+            print(f"[EquipmentDetector] Error during match: {e}", flush=True)
+
     try:
+        # Re-encode if we drew on the image
+        if draw_image is not None:
+            success, encoded_jpeg = cv2.imencode('.jpg', draw_image)
+            if success:
+                frame = encoded_jpeg.tobytes()
+
         jpeg_b64 = base64.b64encode(bytes(frame)).decode("ascii")
         ui.send_message("camera_preview", {"jpeg": jpeg_b64})
     except Exception:
@@ -152,6 +263,14 @@ sensor_az = 0
 sensor_gx = 0
 sensor_gy = 0
 sensor_gz = 0
+sensor_temp = 0.0
+
+# ── Equipment Detector Globals ──────────────────────────────────────────────
+detected_equipment_name = "NONE"
+detected_equipment_matches = 0
+detected_equipment_time = 0.0
+last_logged_equipment = "NONE"
+last_logged_time = 0.0
 
 # ── Safety ──────────────────────────────────────────────────────────────────
 OBSTACLE_THRESHOLD = 150          # mm — auto-avoidance trigger distance
@@ -254,6 +373,7 @@ def broadcast_status_packet():
             "sensor_gx":       sensor_gx,
             "sensor_gy":       sensor_gy,
             "sensor_gz":       sensor_gz,
+            "sensor_temp":     sensor_temp,
             "pose_x":          round(px, 3),
             "pose_y":          round(py, 3),
             "pose_th":         round(math.degrees(pth), 1),
@@ -264,6 +384,9 @@ def broadcast_status_packet():
             "follower_identity": follower_info.get("identity", "NO_PERSON"),
             "follower_identity_name": follower_info.get("identity_name", ""),
             "follower_face_visible": follower_info.get("face_visible", False),
+            # Equipment recognition telemetry
+            "equipment_name": detected_equipment_name if (time.time() - detected_equipment_time < 3.0) else "NONE",
+            "equipment_matches": detected_equipment_matches if (time.time() - detected_equipment_time < 3.0) else 0,
         })
     except Exception:
         pass
@@ -408,6 +531,7 @@ executor = TaskExecutor(robot, task_set_room, task_set_face, memory, ui)
 
 # ── PersonFollower (initialised here so sensor_distance lambda is valid) ──────
 follower = None
+equip_recognizer = None
 if CAMERA_ENABLED:
     try:
         from face_recognizer import FaceRecognizer
@@ -415,6 +539,12 @@ if CAMERA_ENABLED:
     except Exception as exc:
         face_recognizer = None
         print(f"[FaceRecognizer] Disabled: {exc}")
+    try:
+        from equipment_recognizer import EquipmentRecognizer
+        equip_recognizer = EquipmentRecognizer()
+    except Exception as exc:
+        equip_recognizer = None
+        print(f"[EquipmentRecognizer] Disabled: {exc}")
     follower = PersonFollower(
         robot,
         get_sensor_distance=lambda: sensor_distance,
@@ -429,7 +559,7 @@ _map_broadcast_counter = 0   # broadcast map every 5 ticks (1 Hz)
 
 def broadcast_loop():
     global sensor_distance, sensor_ax, sensor_ay, sensor_az
-    global sensor_gx, sensor_gy, sensor_gz
+    global sensor_gx, sensor_gy, sensor_gz, sensor_temp
     global active_cmd, _obstacle_cooldown, _map_broadcast_counter
 
     from arduino.app_utils import Bridge
@@ -442,10 +572,11 @@ def broadcast_loop():
         last_tick = now
 
         try:
-            data_str = Bridge.call("readSensors")
+            with bridge_lock:
+                data_str = Bridge.call("readSensors")
             if data_str:
                 parts = data_str.split(',')
-                if len(parts) == 7:
+                if len(parts) >= 7:
                     sensor_distance = int(parts[0])
                     sensor_ax       = int(parts[1])
                     sensor_ay       = int(parts[2])
@@ -453,6 +584,12 @@ def broadcast_loop():
                     sensor_gx       = int(parts[4])
                     sensor_gy       = int(parts[5])
                     sensor_gz       = int(parts[6])
+                    if len(parts) >= 8:
+                        # MPU6050 Temp offset: T = (raw / 340.0) + 36.53
+                        raw_t = int(parts[7])
+                        sensor_temp = round((raw_t / 340.0) + 36.53, 1)
+                    else:
+                        sensor_temp = 0.0
 
             # Dead-reckoning pose update
             _update_pose(dt)
