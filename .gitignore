@@ -1,9 +1,48 @@
+# Environment & Secrets
 .env
 .venv/
+venv/
+env/
+pyenv/
+.pyenv/
+
+# Python Cache & Build
 __pycache__/
 *.py[cod]
+*$py.class
 .cache/
 .pytest_cache/
-data/
+build/
+dist/
+*.egg-info/
+
+# Data & Private Media
+data/*.db
+data/*.sqlite
 known_people/*
 !known_people/README.md
+known_equipment/
+
+# Heavy Machine Learning / RL Model Weights & Binaries
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.pb
+*.pkl
+*.bin
+*.h5
+*.ckpt
+*.model
+*.safetensors
+
+# RL Experiment Logs & Checkpoints
+runs/
+wandb/
+tb_logs/
+checkpoints/
+RL/
+
+# OS Specific
+.DS_Store
+Thumbs.db
